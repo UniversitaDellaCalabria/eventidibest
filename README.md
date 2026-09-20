@@ -211,4 +211,4 @@ In sintesi: puoi usare, modificare e distribuire il software liberamente, ma **q
 ## Autore
 
 **Emanuele Dodaro** — Universita della Calabria, Dipartimento DiBEST  
-Progetto sviluppato per la gestione eventi accademici (2024–2026).
+Progetto sviluppato per la gestione eventi accademici.
