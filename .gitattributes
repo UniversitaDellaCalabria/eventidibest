@@ -1,0 +1,14 @@
+# Forza LF su tutti i file di testo (evita problemi CRLF su server Linux)
+* text=auto eol=lf
+
+# File binari: nessuna conversione
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.eot  binary

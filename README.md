@@ -5,6 +5,9 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![PHP](https://img.shields.io/badge/PHP-7.4%2B-purple.svg)](https://www.php.net/)
 [![MySQL](https://img.shields.io/badge/MySQL-5.7%2B-orange.svg)](https://www.mysql.com/)
+[![Demo](https://img.shields.io/badge/Demo-Live-green.svg)](https://dibest2.unical.it/eventi/)
+
+**Demo live:** https://dibest2.unical.it/eventi/
 
 ---
 
