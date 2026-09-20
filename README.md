@@ -15,12 +15,13 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 
 - **Gestione eventi multi-area** con sezioni (Pagine) personalizzabili per colori, layout e accessi
 - **Prenotazioni con turni**: apertura/chiusura automatica, lista d'attesa, multi-posto, approvazione manuale
-- **Autenticazione SSO** via SimpleSAMLphp (integrazione SSO Unical) + accesso esterno
+- **Autenticazione SSO** via SimpleSAMLphp (integrazione SSO Unical) + accesso esterno (CIE/SPID)
 - **RBAC** a 3 livelli: Super Admin, Gestore Area/Evento, Utente
 - **Check-in** tramite QR code (scanner da browser, self check-in studente)
 - **Attestati** PDF generati automaticamente al completamento dell'evento
 - **Sondaggi/questionari** collegabili agli eventi con export XLS
 - **Dashboard amministrativa** con KPI, grafici (Chart.js), messaggi non letti
+- **Profilo utente**: pagina dedicata con dati SSO e modifica email personale
 - **Form builder** per campi prenotazione personalizzati per area/evento
 - **Email automatiche**: conferma, cancellazione, promemoria (via SMTP configurabile)
 - **Audit log** di tutte le operazioni amministrative
@@ -106,6 +107,16 @@ chmod 775 uploads/ cache/
 
 Se usi SimpleSAMLphp per l'autenticazione istituzionale, modifica le impostazioni in `saml_login.php` e `functions.php` puntando alla tua istanza SimpleSAML.
 
+La funzione `sync_sso_user()` in `functions.php` gestisce automaticamente la mappatura degli attributi SAML per i diversi tipi di utente:
+
+| Tipo utente | Attributo email cercato | Fallback |
+|---|---|---|
+| Studente | `mail` / OID `0.9.2342.19200300.100.1.3` | `CF@studenti.unical.it` |
+| Dipendente | `mail` / OID `0.9.2342.19200300.100.1.3` | nessuno |
+| Esterno (CIE/SPID) | `mail` / OID `0.9.2342.19200300.100.1.3` | nessuno |
+
+Il tipo viene riconosciuto tramite gli attributi `matricola_studente` e `matricola_dipendente` dell'IdP. Le email errate salvate in precedenza vengono corrette automaticamente al login successivo.
+
 ---
 
 ## Struttura del progetto
@@ -134,7 +145,8 @@ eventidibest-cms/
 ├── prenota.php         # Form prenotazione pubblica
 ├── checkin.php         # Check-in via QR (admin)
 ├── self_checkin.php    # Self check-in studente
-├── area_personale.php  # Area utente loggato
+├── area_personale.php  # Area utente loggato (prenotazioni, messaggi)
+├── profilo.php         # Profilo utente: dati SSO e modifica email
 ├── sw.js               # Service Worker (PWA)
 └── manifest.json       # Web App Manifest (PWA)
 ```
