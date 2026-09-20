@@ -1,0 +1,29 @@
+# Credenziali e configurazioni sensibili
+.env
+
+# Cache runtime (file generati automaticamente)
+cache/*.json
+cache/*.lock
+
+# Uploads utenti (non versionare file caricati)
+uploads/*
+!uploads/.gitkeep
+uploads/allegati_prenotazioni/*
+!uploads/allegati_prenotazioni/.gitkeep
+
+# File di debug (non pubblicare)
+debug_saml.php
+
+# IDE e OS
+.idea/
+.vscode/
+*.DS_Store
+Thumbs.db
+
+# PHP
+*.log
+php_errors.log
+
+# Composer (se aggiunto in futuro)
+vendor/
+composer.lock

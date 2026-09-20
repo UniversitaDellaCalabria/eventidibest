@@ -1,0 +1,3 @@
+# Nega qualunque accesso diretto via browser alla cartella cache/:
+# contiene solo file interni (cache JSON, lock dei cron job), mai da servire.
+Require all denied

@@ -1,0 +1,54 @@
+Options -Indexes -MultiViews
+
+<Files "config.php">
+    Require all denied
+</Files>
+<Files "functions.php">
+    Require all denied
+</Files>
+<Files ".env">
+    Require all denied
+</Files>
+
+# Blocca l'accesso diretto a file di backup/temporanei che possono contenere
+# codice sorgente o credenziali (es. index.php.save, functions.php.save)
+<FilesMatch "\.(save|bak|old|orig|swp|sql|log)(\.\d+)?$">
+    Require all denied
+</FilesMatch>
+
+RewriteEngine On
+RewriteBase /eventi/
+
+# =========================================================================
+# 0. SCUDO CARTELLA ADMIN: Lascia funzionare il backend normalmente!
+# =========================================================================
+# Se la richiesta è dentro /admin/ e omette il .php, glielo aggiunge
+RewriteCond %{REQUEST_URI} ^/eventi/admin/ [NC]
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteCond %{REQUEST_FILENAME}\.php -f
+RewriteRule ^(.*)$ $1.php [QSA,L]
+
+# Se la richiesta è dentro /admin/, fermati qui e non leggere le regole sotto
+RewriteCond %{REQUEST_URI} ^/eventi/admin/ [NC]
+RewriteRule ^ - [L]
+# =========================================================================
+
+# 1. SE IL FILE O LA CARTELLA ESISTE FISICAMENTE, FERMATI QUI E CARICALO
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# 3. SE MANCA L'ESTENSIONE MA IL FILE PHP ESISTE (Es: /area_personale)
+RewriteCond %{REQUEST_FILENAME}\.php -f
+RewriteRule ^(.*)$ $1.php [QSA,L]
+
+# 4. MOTORE DINAMICO CON .PHP
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^([a-zA-Z0-9_-]+)\.php$ area.php?slug=$1 [QSA,L]
+
+# (Opzionale) Manteniamo attiva anche la versione senza estensione
+# nel caso qualcuno avesse salvato il link vecchio
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^([a-zA-Z0-9_-]+)/?$ area.php?slug=$1 [QSA,L]
