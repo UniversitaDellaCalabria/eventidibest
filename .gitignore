@@ -19,6 +19,8 @@ debug_saml.php
 .vscode/
 *.DS_Store
 Thumbs.db
+desktop.ini
+Desktop.ini
 
 # PHP
 *.log
