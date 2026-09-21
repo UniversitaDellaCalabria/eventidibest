@@ -6,27 +6,13 @@ require_once 'functions.php';
 
 sync_sso_user($conn);
 
-$code = isset($_GET['code']) ? trim($_GET['code']) : '';
+$code = trim($_GET['code'] ?? '');
 $id   = (int)($_GET['id'] ?? 0);
 
 if (empty($code) && $id <= 0) { die("Parametri non validi."); }
 
-$where = $id > 0 ? "pr.id = $id" : "pr.codice_prenotazione = '" . $conn->real_escape_string($code) . "'";
-
-$sql = "SELECT pr.*, t.data_turno, t.orario_inizio, t.orario_fine, 
-               e.titolo as evento_titolo, e.luogo as evento_luogo, 
-               pe.titolo as pagina_titolo, cp.logo_path, cp.nome_portale, cp.sottotitolo_portale,
-               COALESCE(NULLIF(pr.matricola, ''), u.matricola_studente, u.matricola_dipendente, u.matricola, '') as matricola_effettiva
-        FROM prenotazioni pr 
-        JOIN turni t ON pr.turno_id = t.id 
-        JOIN eventi e ON t.evento_id = e.id 
-        LEFT JOIN pagine_eventi pe ON e.pagina_id = pe.id 
-        LEFT JOIN utenti u ON pr.utente_id = u.id
-        CROSS JOIN configurazione_portale cp WHERE cp.id = 1 AND $where LIMIT 1";
-
-$res = $conn->query($sql);
-if (!$res || $res->num_rows === 0) { die("Ricevuta non trovata nel sistema."); }
-$p = $res->fetch_assoc();
+$p = get_prenotazione_ricevuta($conn, $code, $id);
+if (!$p) { die("Ricevuta non trovata nel sistema."); }
 
 $u_id = $_SESSION['utente_id'] ?? 0;
 $u_ruolo = $_SESSION['utente_ruolo_id'] ?? 5;

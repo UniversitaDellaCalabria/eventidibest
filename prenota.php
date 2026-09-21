@@ -86,10 +86,10 @@ $nomi_ruoli = [
                             </div>
 
                             <!-- DIMOSTRAZIONE CAMPI CUSTOM (FORM BUILDER) -->
-                            <?php 
-                                $res_cf = $conn->query("SELECT * FROM campi_form WHERE evento_id = {$evento['id']} ORDER BY id ASC");
-                                if ($res_cf && $res_cf->num_rows > 0):
-                                    while ($cf = $res_cf->fetch_assoc()):
+                            <?php
+                                $campi_form = get_campi_form($conn, (int)$evento['id']);
+                                if (!empty($campi_form)):
+                                    foreach ($campi_form as $cf):
                             ?>
                                 <div class="mb-2">
                                     <label class="form-label small fw-bold"><?php echo htmlspecialchars($cf['etichetta']); ?></label>
@@ -103,9 +103,9 @@ $nomi_ruoli = [
                                         <input type="<?php echo $cf['tipo_campo']; ?>" name="custom_<?php echo $cf['nome_campo']; ?>" class="form-control" <?php echo $cf['obbligatorio'] ? 'required' : ''; ?>>
                                     <?php endif; ?>
                                 </div>
-                            <?php 
-                                    endwhile;
-                                endif; 
+                            <?php
+                                    endforeach;
+                                endif;
                             ?>
                         </div>
 

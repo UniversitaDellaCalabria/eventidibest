@@ -15,11 +15,7 @@ $current_filename = $page_slug ?? basename($_SERVER['PHP_SELF'], '.php');
 $current_filename = str_replace('_archivio', '', $current_filename);
 
 // Recupero configurazione area
-$stmt_p = $conn->prepare("SELECT * FROM pagine_eventi WHERE slug = ? LIMIT 1");
-$stmt_p->bind_param("s", $current_filename);
-$stmt_p->execute();
-$res_p = $stmt_p->get_result();
-$page_cfg = ($res_p && $res_p->num_rows > 0) ? $res_p->fetch_assoc() : [];
+$page_cfg = get_pagina_by_slug($conn, $current_filename) ?? [];
 $p_id = (int)($page_cfg['id'] ?? 0);
 
 if ($p_id === 0) { die("Errore: Area di lavoro non trovata nel database. Assicurati che lo slug sia corretto."); }
@@ -27,21 +23,10 @@ if ($p_id === 0) { die("Errore: Area di lavoro non trovata nel database. Assicur
 $col_primaria = $page_cfg['colore_primario'] ?? '#990000';
 
 // RECUPERO EVENTI ARCHIVIATI RAGGRUPPATI PER ANNO
-$sql_arch = "SELECT e.*, sc.nome as nome_sottocategoria, 
-            (SELECT YEAR(MIN(data_turno)) FROM turni WHERE evento_id = e.id) as anno_evento
-            FROM eventi e 
-            LEFT JOIN sottocategorie sc ON e.sottocategoria_id = sc.id 
-            WHERE e.pagina_id = $p_id AND e.archiviato = 1 
-            ORDER BY anno_evento DESC, sc.ordine ASC, e.ordine ASC";
-
-$res_arch = $conn->query($sql_arch);
 $eventi_per_anno = [];
-
-if ($res_arch) {
-    while($row = $res_arch->fetch_assoc()) {
-        $anno = $row['anno_evento'] ?: 'Anno Sconosciuto';
-        $eventi_per_anno[$anno][] = $row;
-    }
+foreach (get_eventi_archivio($conn, $p_id) as $row) {
+    $anno = $row['anno_evento'] ?: 'Anno Sconosciuto';
+    $eventi_per_anno[$anno][] = $row;
 }
 
 // Inclusione Header Frontend

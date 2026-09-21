@@ -2,8 +2,9 @@
 // area.php - Il Vigile Urbano Dinamico (Pagine + Archivi)
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'config.php';
+require_once 'functions.php';
 
-$slug_richiesto = isset($_GET['slug']) ? $conn->real_escape_string(trim($_GET['slug'])) : '';
+$slug_richiesto = trim($_GET['slug'] ?? '');
 
 if (empty($slug_richiesto)) {
     header("Location: index.php");
@@ -11,20 +12,14 @@ if (empty($slug_richiesto)) {
 }
 
 // 1. Capiamo se sta cercando l'archivio
-$is_archivio = false;
-$slug_db = $slug_richiesto;
-
-if (substr($slug_richiesto, -9) === '_archivio') {
-    $is_archivio = true;
-    $slug_db = substr($slug_richiesto, 0, -9);
-}
+$is_archivio = substr($slug_richiesto, -9) === '_archivio';
+$slug_db     = $is_archivio ? substr($slug_richiesto, 0, -9) : $slug_richiesto;
 
 // 2. Controlliamo se la pagina base esiste nel DB
-$sql = "SELECT * FROM pagine_eventi WHERE slug = '$slug_db' LIMIT 1"; 
-$res = $conn->query($sql);
+$pagina = get_pagina_by_slug($conn, $slug_db);
 
 // 3. GESTIONE 404 - Se non esiste, fermiamo tutto e mostriamo errore
-if (!$res || $res->num_rows === 0) {
+if (!$pagina) {
     header("HTTP/1.0 404 Not Found");
     $page_cfg = ['titolo' => 'Pagina non trovata'];
     require_once 'header.php';

@@ -9,37 +9,25 @@ if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'config.php';
 require_once 'functions.php';
 
-$token = $conn->real_escape_string(trim($_GET['token'] ?? ''));
+$token = trim($_GET['token'] ?? '');
 
 // 1. VERIFICHE DI SICUREZZA E VALIDITÀ DEL TOKEN
 if (empty($token)) {
     $errore_msg = "Token di accesso mancante. Impossibile caricare il sondaggio.";
 } else {
-    $res_pren = $conn->query("SELECT pr.*, t.evento_id, e.titolo as evento_titolo FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE pr.token_sondaggio = '$token' LIMIT 1");
-    
-    if (!$res_pren || $res_pren->num_rows === 0) {
+    $prenotazione = get_prenotazione_by_token_sondaggio($conn, $token);
+
+    if (!$prenotazione) {
         $errore_msg = "Link non valido o scaduto.";
+    } elseif ((int)$prenotazione['sondaggio_completato'] === 1) {
+        $errore_msg = "Hai già compilato questo questionario. Grazie per il tuo feedback!";
     } else {
-        $prenotazione = $res_pren->fetch_assoc();
-        
-        if ((int)$prenotazione['sondaggio_completato'] === 1) {
-            $errore_msg = "Hai già compilato questo questionario. Grazie per il tuo feedback!";
+        $sondaggio = get_sondaggio_attivo($conn, (int)$prenotazione['evento_id']);
+        if (!$sondaggio) {
+            $errore_msg = "Al momento non ci sono sondaggi attivi per questo evento.";
         } else {
-            // Cerca il sondaggio attivo per questo evento
-            $ev_id = (int)$prenotazione['evento_id'];
-            $res_sond = $conn->query("SELECT * FROM sondaggi WHERE evento_id = $ev_id AND attivo = 1 LIMIT 1");
-            
-            if (!$res_sond || $res_sond->num_rows === 0) {
-                $errore_msg = "Al momento non ci sono sondaggi attivi per questo evento.";
-            } else {
-                $sondaggio = $res_sond->fetch_assoc();
-                $sond_id = (int)$sondaggio['id'];
-                
-                // Recupera le domande
-                $domande = [];
-                $res_dom = $conn->query("SELECT * FROM sondaggi_domande WHERE sondaggio_id = $sond_id ORDER BY ordine ASC, id ASC");
-                if ($res_dom) { while($d = $res_dom->fetch_assoc()) { $domande[] = $d; } }
-            }
+            $sond_id = (int)$sondaggio['id'];
+            $domande = get_domande_sondaggio($conn, $sond_id);
         }
     }
 }
@@ -48,30 +36,8 @@ if (empty($token)) {
 $successo = false;
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_sondaggio']) && !isset($errore_msg)) {
     $s_id_post = (int)$_POST['sondaggio_id'];
-    
-    // Sicurezza extra: verifica che si stia compilando il sondaggio corretto
-    if ($s_id_post === $sond_id) {
-        if (isset($_POST['risposta']) && is_array($_POST['risposta'])) {
-            foreach ($_POST['risposta'] as $d_id => $valore) {
-                $d_id_clean = (int)$d_id;
-                
-                // Gestione dei dati multi-scelta e della matrice JSON
-                if (is_array($valore)) {
-                    // Controlliamo se ci arriva un array di valori (Checkbox o Matrice)
-                    $valore_clean = $conn->real_escape_string(json_encode($valore, JSON_UNESCAPED_UNICODE));
-                } else {
-                    $valore_clean = $conn->real_escape_string(trim($valore));
-                }
-                
-                if ($valore_clean !== '' && $valore_clean !== '[]') {
-                    $conn->query("INSERT INTO sondaggi_risposte (sondaggio_id, domanda_id, risposta) VALUES ($s_id_post, $d_id_clean, '$valore_clean')");
-                }
-            }
-        }
-        // Disattiva il token per questo utente
-        $pr_id = (int)$prenotazione['id'];
-        $conn->query("UPDATE prenotazioni SET sondaggio_completato = 1 WHERE id = $pr_id");
-        $successo = true;
+    if ($s_id_post === $sond_id && isset($_POST['risposta']) && is_array($_POST['risposta'])) {
+        $successo = salva_risposte_sondaggio($conn, $sond_id, $_POST['risposta'], (int)$prenotazione['id']);
     }
 }
 

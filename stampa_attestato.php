@@ -7,29 +7,11 @@ require_once 'functions.php';
 
 sync_sso_user($conn);
 
-$code = isset($_GET['code']) ? trim($_GET['code']) : '';
+$code = trim($_GET['code'] ?? '');
 if (empty($code)) { die("Codice di sicurezza non valido."); }
 
-// QUERY CORRETTA: Peschiamo firma_nome, firma_titolo e logo_attestato_path dalla tabella `pagine_eventi` (pe)
-$sql = "SELECT pr.*, t.data_turno, t.orario_inizio, t.orario_fine, 
-               e.titolo as evento_titolo, e.luogo as evento_luogo, 
-               pe.titolo as pagina_titolo, pe.firma_nome, pe.firma_titolo, pe.logo_attestato_path,
-               cp.logo_path, cp.nome_portale, cp.sottotitolo_portale,
-               COALESCE(NULLIF(pr.matricola, ''), u.matricola_studente, u.matricola_dipendente, u.matricola, '') as matricola_effettiva
-        FROM prenotazioni pr 
-        JOIN turni t ON pr.turno_id = t.id 
-        JOIN eventi e ON t.evento_id = e.id 
-        LEFT JOIN pagine_eventi pe ON e.pagina_id = pe.id 
-        LEFT JOIN utenti u ON pr.utente_id = u.id
-        CROSS JOIN configurazione_portale cp WHERE cp.id = 1 AND pr.codice_prenotazione = ? LIMIT 1";
-
-$stmt = $conn->prepare($sql);
-$stmt->bind_param("s", $code);
-$stmt->execute();
-$res = $stmt->get_result();
-
-if (!$res || $res->num_rows === 0) { die("Nessun dato trovato per questo codice."); }
-$p = $res->fetch_assoc();
+$p = get_attestato($conn, $code);
+if (!$p) { die("Nessun dato trovato per questo codice."); }
 
 // CONTROLLO DI SICUREZZA
 if ((int)$p['presente'] !== 1) {

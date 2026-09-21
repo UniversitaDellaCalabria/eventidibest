@@ -66,6 +66,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_messaggio_utent
 }
 
 // =======================================================================
+// AZIONE: AGGIORNAMENTO EMAIL (TAB PROFILO)
+// =======================================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['aggiorna_email'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
+    $nuova_email = strtolower(trim($_POST['nuova_email'] ?? ''));
+    if (empty($nuova_email) || !filter_var($nuova_email, FILTER_VALIDATE_EMAIL)) {
+        $_SESSION['msg_area_pers'] = "<div class='alert alert-danger fw-bold text-center my-3 shadow-sm'><i class='fa fa-times-circle me-1'></i> Inserisci un indirizzo email valido.</div>";
+    } else {
+        $risultato = aggiorna_email_utente($conn, $u_id, $nuova_email);
+        if ($risultato === true) {
+            $_SESSION['utente_email'] = $nuova_email;
+            $_SESSION['msg_area_pers'] = "<div class='alert alert-success fw-bold text-center my-3 shadow-sm'><i class='fa fa-check-circle me-1'></i> Email aggiornata correttamente.</div>";
+        } else {
+            $_SESSION['msg_area_pers'] = "<div class='alert alert-danger fw-bold text-center my-3 shadow-sm'><i class='fa fa-times-circle me-1'></i> " . htmlspecialchars($risultato) . "</div>";
+        }
+    }
+    header("Location: area_personale.php#profilo");
+    exit;
+}
+
+// =======================================================================
 // AZIONE: MODIFICA PRENOTAZIONE (SECURE - Prepared Statements + Cambio Turno)
 // =======================================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_prenotazione_utente'])) {
@@ -505,6 +526,11 @@ require_once 'header.php';
         <li class="nav-item" role="presentation">
             <button class="nav-link rounded-pill fw-bold" id="pills-sondaggi-tab" data-bs-toggle="pill" data-bs-target="#pills-sondaggi" type="button" role="tab">
                 <i class="fa fa-poll me-1"></i> Sondaggi
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link rounded-pill fw-bold" id="pills-profilo-tab" data-bs-toggle="pill" data-bs-target="#pills-profilo" type="button" role="tab">
+                <i class="fa fa-user-edit me-1"></i> Profilo
             </button>
         </li>
     </ul>
@@ -949,6 +975,85 @@ require_once 'header.php';
             <?php endif; ?>
         </div>
 
+        <!-- TAB 4: PROFILO -->
+        <div class="tab-pane fade" id="pills-profilo" role="tabpanel" tabindex="0">
+            <?php $ruoli_label = [1=>'Amministratore',2=>'Gestore',3=>'Studente',4=>'Dipendente',5=>'Esterno']; ?>
+
+            <!-- Dati anagrafici -->
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header fw-bold"><i class="fa fa-id-card me-2 text-secondary"></i>Dati personali</div>
+                <div class="card-body">
+                    <dl class="row mb-0">
+                        <dt class="col-sm-4 text-muted">Nome e cognome</dt>
+                        <dd class="col-sm-8"><?php echo htmlspecialchars(trim(($user_info['nome'] ?? '') . ' ' . ($user_info['cognome'] ?? ''))); ?></dd>
+
+                        <dt class="col-sm-4 text-muted">Codice fiscale</dt>
+                        <dd class="col-sm-8 font-monospace"><?php echo htmlspecialchars($user_info['codice_fiscale'] ?? '—'); ?></dd>
+
+                        <dt class="col-sm-4 text-muted">Ruolo</dt>
+                        <dd class="col-sm-8">
+                            <?php
+                            $label_ruolo = $ruoli_label[$u_ruolo] ?? 'Sconosciuto';
+                            $badge_color = ['Amministratore'=>'danger','Gestore'=>'warning text-dark','Studente'=>'primary','Dipendente'=>'success','Esterno'=>'secondary'];
+                            $bc = $badge_color[$label_ruolo] ?? 'secondary';
+                            echo '<span class="badge bg-' . $bc . '">' . htmlspecialchars($label_ruolo) . '</span>';
+                            if (!empty($user_info['ruoli_secondari'])) {
+                                foreach (explode(',', $user_info['ruoli_secondari']) as $rs) {
+                                    $rs = trim($rs);
+                                    if ($rs !== '' && isset($ruoli_label[(int)$rs])) {
+                                        $lrs = $ruoli_label[(int)$rs];
+                                        $brs = $badge_color[$lrs] ?? 'secondary';
+                                        echo ' <span class="badge bg-' . $brs . ' opacity-75">' . htmlspecialchars($lrs) . '</span>';
+                                    }
+                                }
+                            }
+                            ?>
+                        </dd>
+
+                        <?php if (!empty($user_info['matricola_studente'])): ?>
+                        <dt class="col-sm-4 text-muted">Matricola studente</dt>
+                        <dd class="col-sm-8 font-monospace"><?php echo htmlspecialchars($user_info['matricola_studente']); ?></dd>
+                        <?php endif; ?>
+
+                        <?php if (!empty($user_info['matricola_dipendente'])): ?>
+                        <dt class="col-sm-4 text-muted">Matricola dipendente</dt>
+                        <dd class="col-sm-8 font-monospace"><?php echo htmlspecialchars($user_info['matricola_dipendente']); ?></dd>
+                        <?php endif; ?>
+                    </dl>
+                </div>
+            </div>
+
+            <!-- Email -->
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header fw-bold"><i class="fa fa-envelope me-2 text-secondary"></i>Indirizzo email</div>
+                <div class="card-body">
+                    <p class="mb-3">Email attuale:
+                        <?php if (!empty($user_info['email'])): ?>
+                            <strong><?php echo htmlspecialchars($user_info['email']); ?></strong>
+                        <?php else: ?>
+                            <span class="text-muted fst-italic">non impostata</span>
+                        <?php endif; ?>
+                    </p>
+                    <p class="text-muted small mb-3">
+                        <i class="fa fa-info-circle me-1"></i>
+                        Questa email viene usata per le notifiche di conferma, promemoria e comunicazioni relative alle tue prenotazioni.
+                        L'email fornita dall'Università al momento del login viene salvata automaticamente; puoi sovrascriverla qui se preferisci usarne un'altra.
+                    </p>
+                    <form method="POST" novalidate>
+                        <?php csrf_field(); ?>
+                        <input type="hidden" name="aggiorna_email" value="1">
+                        <div class="input-group">
+                            <input type="email" name="nuova_email" class="form-control"
+                                   placeholder="nuova@email.it"
+                                   value="<?php echo htmlspecialchars($user_info['email'] ?? ''); ?>"
+                                   required aria-label="Nuovo indirizzo email">
+                            <button type="submit" class="btn btn-primary"><i class="fa fa-save me-1"></i> Salva</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
     </div>
 </div>
 
@@ -981,8 +1086,9 @@ function apriFinestraAnnulla(btn) {
 // Auto-scroll alla tab storico se si ritorna dopo un'azione
 (function(){
     var hash = window.location.hash;
-    if (hash === '#storico') {
-        var t = document.getElementById('pills-passate-tab');
+    var tabMap = { '#storico': 'pills-passate-tab', '#sondaggi': 'pills-sondaggi-tab', '#profilo': 'pills-profilo-tab' };
+    if (tabMap[hash]) {
+        var t = document.getElementById(tabMap[hash]);
         if (t) { bootstrap.Tab.getOrCreateInstance(t).show(); }
     }
 })();

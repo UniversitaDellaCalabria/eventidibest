@@ -2,14 +2,7 @@
 $page_title = "EventiDiBEST - Portale Eventi e Laboratori Dipartimentali";
 require_once 'header.php';
 
-// Recupero pagine evento: mostra SOLO quelle con visibile = 1
-$res_p = $conn->query("SELECT * FROM pagine_eventi WHERE visibile = 1 ORDER BY ordine ASC, id ASC");
-$pagine = [];
-if ($res_p) {
-    while ($r = $res_p->fetch_assoc()) {
-        $pagine[] = $r;
-    }
-}
+$pagine = get_pagine_eventi_visibili($conn);
 ?>
 
 <style>

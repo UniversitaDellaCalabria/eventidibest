@@ -448,6 +448,213 @@ if (!function_exists('get_configurazione_portale')) {
 }
 
 // =======================================================================
+// SONDAGGI
+// =======================================================================
+if (!function_exists('get_prenotazione_by_token_sondaggio')) {
+    function get_prenotazione_by_token_sondaggio($conn, string $token): ?array {
+        $stmt = $conn->prepare(
+            "SELECT pr.*, t.evento_id, e.titolo as evento_titolo
+             FROM prenotazioni pr
+             JOIN turni t ON pr.turno_id = t.id
+             JOIN eventi e ON t.evento_id = e.id
+             WHERE pr.token_sondaggio = ? LIMIT 1"
+        );
+        $stmt->bind_param("s", $token);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        return ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    }
+}
+
+if (!function_exists('get_sondaggio_attivo')) {
+    function get_sondaggio_attivo($conn, int $evento_id): ?array {
+        $stmt = $conn->prepare("SELECT * FROM sondaggi WHERE evento_id = ? AND attivo = 1 LIMIT 1");
+        $stmt->bind_param("i", $evento_id);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        return ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    }
+}
+
+if (!function_exists('get_domande_sondaggio')) {
+    function get_domande_sondaggio($conn, int $sondaggio_id): array {
+        $stmt = $conn->prepare("SELECT * FROM sondaggi_domande WHERE sondaggio_id = ? ORDER BY ordine ASC, id ASC");
+        $stmt->bind_param("i", $sondaggio_id);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $rows = [];
+        if ($res) { while ($d = $res->fetch_assoc()) { $rows[] = $d; } }
+        return $rows;
+    }
+}
+
+if (!function_exists('salva_risposte_sondaggio')) {
+    function salva_risposte_sondaggio($conn, int $sond_id, array $risposte, int $pr_id): bool {
+        $stmt_ins = $conn->prepare("INSERT INTO sondaggi_risposte (sondaggio_id, domanda_id, risposta) VALUES (?, ?, ?)");
+        foreach ($risposte as $d_id => $valore) {
+            $d_id_clean = (int)$d_id;
+            $val = is_array($valore) ? json_encode($valore, JSON_UNESCAPED_UNICODE) : trim($valore);
+            if ($val !== '' && $val !== '[]') {
+                $stmt_ins->bind_param("iis", $sond_id, $d_id_clean, $val);
+                $stmt_ins->execute();
+            }
+        }
+        $stmt_upd = $conn->prepare("UPDATE prenotazioni SET sondaggio_completato = 1 WHERE id = ?");
+        $stmt_upd->bind_param("i", $pr_id);
+        return $stmt_upd->execute();
+    }
+}
+
+// =======================================================================
+// ARCHIVIO EVENTI
+// =======================================================================
+if (!function_exists('get_eventi_archivio')) {
+    function get_eventi_archivio($conn, int $p_id): array {
+        $stmt = $conn->prepare(
+            "SELECT e.*, sc.nome as nome_sottocategoria,
+             (SELECT YEAR(MIN(data_turno)) FROM turni WHERE evento_id = e.id) as anno_evento
+             FROM eventi e
+             LEFT JOIN sottocategorie sc ON e.sottocategoria_id = sc.id
+             WHERE e.pagina_id = ? AND e.archiviato = 1
+             ORDER BY anno_evento DESC, sc.ordine ASC, e.ordine ASC"
+        );
+        $stmt->bind_param("i", $p_id);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $rows = [];
+        if ($res) { while ($r = $res->fetch_assoc()) { $rows[] = $r; } }
+        return $rows;
+    }
+}
+
+// =======================================================================
+// FORM / CAMPI CUSTOM
+// =======================================================================
+if (!function_exists('get_campi_form')) {
+    function get_campi_form($conn, int $evento_id): array {
+        $stmt = $conn->prepare("SELECT * FROM campi_form WHERE evento_id = ? ORDER BY id ASC");
+        $stmt->bind_param("i", $evento_id);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $rows = [];
+        if ($res) { while ($r = $res->fetch_assoc()) { $rows[] = $r; } }
+        return $rows;
+    }
+}
+
+// =======================================================================
+// PRENOTAZIONI / RICEVUTA
+// =======================================================================
+if (!function_exists('get_attestato')) {
+    function get_attestato($conn, string $code): ?array {
+        $stmt = $conn->prepare(
+            "SELECT pr.*, t.data_turno, t.orario_inizio, t.orario_fine,
+               e.titolo as evento_titolo, e.luogo as evento_luogo,
+               pe.titolo as pagina_titolo, pe.firma_nome, pe.firma_titolo, pe.logo_attestato_path,
+               cp.logo_path, cp.nome_portale, cp.sottotitolo_portale,
+               COALESCE(NULLIF(pr.matricola,''), u.matricola_studente, u.matricola_dipendente, u.matricola, '') as matricola_effettiva
+            FROM prenotazioni pr
+            JOIN turni t ON pr.turno_id = t.id
+            JOIN eventi e ON t.evento_id = e.id
+            LEFT JOIN pagine_eventi pe ON e.pagina_id = pe.id
+            LEFT JOIN utenti u ON pr.utente_id = u.id
+            JOIN configurazione_portale cp ON cp.id = 1
+            WHERE pr.codice_prenotazione = ? LIMIT 1"
+        );
+        $stmt->bind_param("s", $code);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        return ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    }
+}
+
+if (!function_exists('get_prenotazione_ricevuta')) {
+    function get_prenotazione_ricevuta($conn, string $code, int $id): ?array {
+        $select = "SELECT pr.*, t.data_turno, t.orario_inizio, t.orario_fine,
+               e.titolo as evento_titolo, e.luogo as evento_luogo,
+               pe.titolo as pagina_titolo,
+               cp.logo_path, cp.nome_portale, cp.sottotitolo_portale,
+               COALESCE(NULLIF(pr.matricola,''), u.matricola_studente, u.matricola_dipendente, u.matricola, '') as matricola_effettiva
+            FROM prenotazioni pr
+            JOIN turni t ON pr.turno_id = t.id
+            JOIN eventi e ON t.evento_id = e.id
+            LEFT JOIN pagine_eventi pe ON e.pagina_id = pe.id
+            LEFT JOIN utenti u ON pr.utente_id = u.id
+            JOIN configurazione_portale cp ON cp.id = 1
+            WHERE ";
+        if ($id > 0) {
+            $stmt = $conn->prepare($select . "pr.id = ? LIMIT 1");
+            $stmt->bind_param("i", $id);
+        } else {
+            $stmt = $conn->prepare($select . "pr.codice_prenotazione = ? LIMIT 1");
+            $stmt->bind_param("s", $code);
+        }
+        $stmt->execute();
+        $res = $stmt->get_result();
+        return ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    }
+}
+
+// =======================================================================
+// PAGINE EVENTI
+// =======================================================================
+if (!function_exists('get_pagina_by_slug')) {
+    function get_pagina_by_slug($conn, string $slug): ?array {
+        $stmt = $conn->prepare("SELECT * FROM pagine_eventi WHERE slug = ? LIMIT 1");
+        $stmt->bind_param("s", $slug);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        return ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    }
+}
+
+// =======================================================================
+// PAGINE EVENTI (HOME)
+// =======================================================================
+if (!function_exists('get_pagine_eventi_visibili')) {
+    function get_pagine_eventi_visibili($conn): array {
+        $res = $conn->query("SELECT * FROM pagine_eventi WHERE visibile = 1 ORDER BY ordine ASC, id ASC");
+        $rows = [];
+        if ($res) { while ($r = $res->fetch_assoc()) { $rows[] = $r; } }
+        return $rows;
+    }
+}
+
+// =======================================================================
+// TURNI
+// =======================================================================
+if (!function_exists('get_turno_con_evento')) {
+    function get_turno_con_evento($conn, int $turno_id): ?array {
+        $stmt = $conn->prepare("SELECT t.*, e.titolo as evento_titolo, e.descrizione, e.luogo FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = ? LIMIT 1");
+        $stmt->bind_param("i", $turno_id);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        return ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    }
+}
+
+// =======================================================================
+// PROFILO UTENTE
+// =======================================================================
+if (!function_exists('aggiorna_email_utente')) {
+    /**
+     * Aggiorna l'email dell'utente e la marca come personalizzata.
+     * Ritorna true in caso di successo, oppure una stringa di errore.
+     */
+    function aggiorna_email_utente($conn, int $u_id, string $nuova_email) {
+        $stmt_chk = $conn->prepare("SELECT id FROM utenti WHERE LOWER(email) = ? AND id != ? LIMIT 1");
+        $stmt_chk->bind_param("si", $nuova_email, $u_id);
+        $stmt_chk->execute();
+        if ($stmt_chk->get_result()->num_rows > 0) {
+            return 'Questa email è già associata a un altro account.';
+        }
+        $stmt_upd = $conn->prepare("UPDATE utenti SET email = ?, email_personalizzata = 1 WHERE id = ?");
+        $stmt_upd->bind_param("si", $nuova_email, $u_id);
+        return $stmt_upd->execute() ? true : 'Errore durante il salvataggio. Riprova.';
+    }
+}
+
+// =======================================================================
 // RICERCA GLOBALE
 // =======================================================================
 if (!function_exists('cerca_eventi')) {

@@ -12,7 +12,7 @@ if (empty($_SESSION['utente_id'])) {
 @$conn->query("ALTER TABLE prenotazioni ADD COLUMN data_presenza DATETIME NULL");
 
 $t_id = (int)($_GET['t'] ?? 0);
-$token = $conn->real_escape_string($_GET['k'] ?? '');
+$token = trim($_GET['k'] ?? '');
 $u_id = (int)$_SESSION['utente_id'];
 $esito = ""; $msg = ""; $colore = ""; $icona = "";
 
@@ -21,11 +21,10 @@ if ($t_id === 0 || empty($token)) {
     $msg = "Dati del QR Code mancanti o incompleti. Prova a ripetere la scansione.";
     $colore = "danger"; $icona = "fa-qrcode";
 } else {
-    $sql_check = "SELECT t.*, e.titolo as evento_titolo, e.luogo 
-                  FROM turni t 
-                  JOIN eventi e ON t.evento_id = e.id 
-                  WHERE t.id = $t_id AND t.token_checkin = '$token' LIMIT 1";
-    $res_check = $conn->query($sql_check);
+    $stmt_t = $conn->prepare("SELECT t.*, e.titolo as evento_titolo, e.luogo FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = ? AND t.token_checkin = ? LIMIT 1");
+    $stmt_t->bind_param("is", $t_id, $token);
+    $stmt_t->execute();
+    $res_check = $stmt_t->get_result();
 
     if (!$res_check || $res_check->num_rows === 0) {
         $esito = "error";
@@ -33,11 +32,11 @@ if ($t_id === 0 || empty($token)) {
         $colore = "danger"; $icona = "fa-times-circle";
     } else {
         $turno = $res_check->fetch_assoc();
-        
+
         $inizio_ts = strtotime($turno['data_turno'] . ' ' . $turno['orario_inizio']) - (30 * 60);
         $fine_ts = strtotime($turno['data_turno'] . ' ' . $turno['orario_fine']);
         $now = time();
-        
+
         if ($now < $inizio_ts) {
             $esito = "warning"; $colore = "warning"; $icona = "fa-clock";
             $msg = "È troppo presto per registrarsi! Il check-in aprirà 30 minuti prima dell'inizio.";
@@ -45,15 +44,17 @@ if ($t_id === 0 || empty($token)) {
             $esito = "error"; $colore = "secondary"; $icona = "fa-calendar-times";
             $msg = "Il periodo per registrare la presenza a questo evento è terminato.";
         } else {
-            $sql_pren = "SELECT id, stato, presente FROM prenotazioni WHERE turno_id = $t_id AND utente_id = $u_id LIMIT 1";
-            $res_pren = $conn->query($sql_pren);
-            
+            $stmt_p = $conn->prepare("SELECT id, stato, presente FROM prenotazioni WHERE turno_id = ? AND utente_id = ? LIMIT 1");
+            $stmt_p->bind_param("ii", $t_id, $u_id);
+            $stmt_p->execute();
+            $res_pren = $stmt_p->get_result();
+
             if (!$res_pren || $res_pren->num_rows === 0) {
                 $esito = "error"; $colore = "danger"; $icona = "fa-user-times";
                 $msg = "Non risulti iscritto a questo turno. Devi prima effettuare la prenotazione.";
             } else {
                 $pren = $res_pren->fetch_assoc();
-                
+
                 if ($pren['stato'] !== 'confermata') {
                     $esito = "error"; $colore = "danger"; $icona = "fa-exclamation-triangle";
                     $msg = "La tua iscrizione non è confermata (Stato: " . strtoupper($pren['stato']) . ").";
@@ -61,7 +62,9 @@ if ($t_id === 0 || empty($token)) {
                     $esito = "success"; $colore = "success"; $icona = "fa-check-double";
                     $msg = "La tua presenza era già stata registrata. Nessuna ulteriore azione richiesta.";
                 } else {
-                    $conn->query("UPDATE prenotazioni SET presente = 1, data_presenza = NOW() WHERE id = " . $pren['id']);
+                    $stmt_u = $conn->prepare("UPDATE prenotazioni SET presente = 1, data_presenza = NOW() WHERE id = ?");
+                    $stmt_u->bind_param("i", $pren['id']);
+                    $stmt_u->execute();
                     $esito = "success"; $colore = "success"; $icona = "fa-check-circle";
                     $msg = "Check-in completato con successo! Presenza convalidata ufficialmente.";
                 }
