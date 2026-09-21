@@ -138,10 +138,9 @@ if (!function_exists('sync_sso_user')) {
             return true;
 
         } catch (\Throwable $e) {
-            // Sessione SSO corrotta o scaduta: resetta e forza nuovo login
+            // Errore SimpleSAML: logga ma NON distruggere la sessione,
+            // che potrebbe contenere dati validi scritti da saml_login.php.
             error_log('[SSO] sync_sso_user exception: ' . $e->getMessage());
-            session_unset();
-            session_destroy();
             return false;
         }
     }

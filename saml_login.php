@@ -1,7 +1,5 @@
 <?php
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
-}
+// config.php apre la sessione con i cookie params corretti (SameSite, Secure, HttpOnly)
 require_once 'config.php';
 require_once 'functions.php';
 
@@ -17,6 +15,7 @@ if (!check_rate_limit($conn, 'saml_login', 15, 300)) {
 @$conn->query("ALTER TABLE utenti ADD COLUMN matricola_dipendente VARCHAR(50) AFTER matricola_studente");
 @$conn->query("ALTER TABLE utenti ADD COLUMN ultimo_accesso DATETIME DEFAULT NULL");
 @$conn->query("ALTER TABLE utenti ADD COLUMN ruoli_secondari VARCHAR(255) DEFAULT ''");
+@$conn->query("ALTER TABLE utenti ADD COLUMN email_personalizzata TINYINT(1) NOT NULL DEFAULT 0");
 
 $conn->query("INSERT IGNORE INTO ruoli (id, nome) VALUES 
     (1, 'Amministratore'), 
@@ -31,9 +30,29 @@ unset($_saml_env);
 
 if (file_exists($simplesaml_path)) {
     require_once($simplesaml_path);
+
+    // Salviamo nome e ID della nostra sessione PHP (quella che il browser conosce)
+    // PRIMA che requireAuth() la sostituisca con la sessione interna di SimpleSAML.
+    $our_session_name = session_name();
+    $our_session_id   = session_id();
+
     $as = new \SimpleSAML\Auth\Simple('default-sp');
     $as->requireAuth();
-    
+
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
+    session_name($our_session_name);
+    session_id($our_session_id);
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path'     => '/',
+        'secure'   => true,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+    session_start();
+
     $attributes = $as->getAttributes();
     
     // CODICE FISCALE
@@ -99,7 +118,7 @@ if (file_exists($simplesaml_path)) {
             $u_info = $res_chk->fetch_assoc();
             $u_id = (int)$u_info['id'];
 
-            $stmt_upd = $conn->prepare("UPDATE utenti SET ultimo_accesso = NOW(), email = IF(? != '', ?, email), nome = IF(nome = 'Utente' AND ? != 'Utente', ?, nome), cognome = IF(cognome = '' AND ? != '', ?, cognome) WHERE id = ?");
+            $stmt_upd = $conn->prepare("UPDATE utenti SET ultimo_accesso = NOW(), email = IF(? != '' AND email_personalizzata = 0, ?, email), nome = IF(nome = 'Utente' AND ? != 'Utente', ?, nome), cognome = IF(cognome = '' AND ? != '', ?, cognome) WHERE id = ?");
             $stmt_upd->bind_param("ssssssi", $email_clean, $email_clean, $nome_clean, $nome_clean, $cognome_clean, $cognome_clean, $u_id);
             $stmt_upd->execute();
         } else {
@@ -116,9 +135,6 @@ if (file_exists($simplesaml_path)) {
             $stmt_info->execute();
             $u_info = $stmt_info->get_result()->fetch_assoc();
         }
-
-        // Rigenera l'ID di sessione dopo il login per prevenire session fixation
-        session_regenerate_id(true);
 
         $_SESSION['utente_id']       = (int)$u_info['id'];
         $_SESSION['utente_cf']       = $u_info['codice_fiscale'];
@@ -141,5 +157,17 @@ if (
 } else {
     $redirect = 'index.php';
 }
-header("Location: " . $redirect);
+$redirect_js = htmlspecialchars($redirect, ENT_QUOTES, 'UTF-8');
+// JS redirect bypassa bfcache e cache HTTP: il browser ricarica sempre la pagina dal server
+ob_end_clean();
+?><!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<title>Accesso completato</title>
+<script>window.location.replace('<?php echo $redirect_js; ?>');</script>
+</head>
+<body>Accesso effettuato. <a href="<?php echo $redirect_js; ?>">Clicca qui se non vieni reindirizzato.</a></body>
+</html>
+<?php
 exit;

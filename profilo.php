@@ -27,7 +27,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['aggiorna_email'])) {
         if ($stmt_chk->get_result()->num_rows > 0) {
             $flash_err = 'Questa email è già associata a un altro account.';
         } else {
-            $stmt_upd = $conn->prepare("UPDATE utenti SET email = ? WHERE id = ?");
+            $stmt_upd = $conn->prepare("UPDATE utenti SET email = ?, email_personalizzata = 1 WHERE id = ?");
             $stmt_upd->bind_param("si", $nuova_email, $u_id);
             if ($stmt_upd->execute()) {
                 $_SESSION['utente_email'] = $nuova_email;

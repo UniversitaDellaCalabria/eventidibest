@@ -5,14 +5,15 @@ ini_set('log_errors', 1);
 ini_set('display_startup_errors', 0);
 error_reporting(E_ALL);
 
-if (session_status() === PHP_SESSION_NONE) { session_start(); }
-
 global $conn;
 
+// config.php apre la sessione con cookie params corretti (SameSite, Secure, HttpOnly)
 if (!isset($conn) || !($conn instanceof mysqli)) {
-    if (file_exists(__DIR__ . '/config.php')) { require_once __DIR__ . '/config.php'; } 
+    if (file_exists(__DIR__ . '/config.php')) { require_once __DIR__ . '/config.php'; }
     else { die("Errore critico: File config.php mancante!"); }
 }
+
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
 
 if (file_exists(__DIR__ . '/functions.php')) {
     require_once __DIR__ . '/functions.php';
@@ -158,6 +159,65 @@ if ($u_logged_header) {
         body.high-contrast .it-header-center-wrapper, body.high-contrast .top-bar-istituzionale, body.high-contrast nav, body.high-contrast .card { background-color: #000000 !important; border: 1px solid #ffff00 !important; }
         body.high-contrast img { filter: grayscale(100%) contrast(150%); border: 2px solid #ffff00; }
         body.high-contrast .badge { border: 1px solid #ffff00; }
+
+        /* ── MOBILE SIDEBAR ─────────────────────────────────────── */
+        #mobileNav {
+            position: fixed; top: 0; left: 0;
+            width: 280px; height: 100%;
+            background: #1e293b;
+            z-index: 1100;
+            transform: translateX(-100%);
+            transition: transform 0.3s ease;
+            display: flex; flex-direction: column;
+            overflow-y: auto;
+        }
+        #mobileNav.active {
+            transform: translateX(0);
+            box-shadow: 6px 0 24px rgba(0,0,0,0.45);
+        }
+        #mobileNavOverlay {
+            display: none; position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); z-index: 1050;
+        }
+        #mobileNavOverlay.active { display: block; }
+
+        .mob-nav-header {
+            background: #B30000; padding: 1rem;
+            display: flex; align-items: center;
+            justify-content: space-between; flex-shrink: 0;
+        }
+        .mob-nav-title  { color: #fff; font-weight: 700; font-size: 1rem; }
+        .mob-nav-sub    { color: rgba(255,255,255,0.65); font-size: 0.75rem; }
+        #mobileNavClose { background: transparent; border: none; color: #fff; font-size: 1.4rem; line-height: 1; padding: 0; }
+
+        .mob-nav-body   { padding: 1rem; flex: 1; }
+        .mob-nav-search { margin-bottom: 1rem; }
+
+        .mob-nav-label {
+            text-transform: uppercase; font-size: 0.68rem; font-weight: 700;
+            color: rgba(255,255,255,0.35); letter-spacing: 0.08em;
+            padding: 0.25rem 0; border-bottom: 1px solid rgba(255,255,255,0.08);
+            margin-bottom: 0.4rem;
+        }
+        .mob-nav-group-label {
+            font-size: 0.72rem; font-weight: 700;
+            color: rgba(255,255,255,0.45); text-transform: uppercase;
+            padding: 0.55rem 0 0.2rem; letter-spacing: 0.05em;
+        }
+        .mob-nav-link {
+            display: block; padding: 0.5rem 0.25rem;
+            color: #cbd5e1 !important; text-decoration: none;
+            font-size: 0.93rem;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            transition: color 0.15s, padding-left 0.15s;
+        }
+        .mob-nav-link:hover { color: #fff !important; padding-left: 0.5rem; }
+        .mob-nav-user {
+            color: #fff; font-weight: 600; font-size: 0.88rem;
+            padding: 0.45rem 0; border-bottom: 1px solid rgba(255,255,255,0.12);
+            margin-bottom: 0.4rem;
+        }
     </style>
 </head>
 <body>
@@ -253,11 +313,96 @@ if ($u_logged_header) {
     </div>
 </header>
 
+<!-- ============================================================ -->
+<!-- MOBILE SIDEBAR (slides from left, only mobile/tablet) -->
+<!-- ============================================================ -->
+<div id="mobileNav" aria-label="Menu mobile" role="navigation">
+    <div class="mob-nav-header">
+        <div>
+            <div class="mob-nav-title"><?php echo htmlspecialchars($titolo_portale); ?></div>
+            <div class="mob-nav-sub">Menu di navigazione</div>
+        </div>
+        <button id="mobileNavClose" aria-label="Chiudi menu"><i class="fa fa-times" aria-hidden="true"></i></button>
+    </div>
+    <div class="mob-nav-body">
+        <form action="ricerca.php" method="GET" class="mob-nav-search" role="search">
+            <div class="input-group">
+                <input type="text" name="q" class="form-control" placeholder="Cerca eventi..." required aria-label="Cerca nel portale">
+                <button class="btn btn-danger" type="submit" aria-label="Avvia ricerca"><i class="fa fa-search" aria-hidden="true"></i></button>
+            </div>
+        </form>
+
+        <div class="mob-nav-label">Navigazione</div>
+        <?php
+        if (isset($conn) && $conn instanceof mysqli) {
+            $res_mob = @$conn->query("SELECT * FROM menu_voci WHERE genitore_id = 0 AND (visibile IS NULL OR visibile = 1) ORDER BY ordine ASC");
+            if ($res_mob && $res_mob->num_rows > 0):
+                while ($mob_m = $res_mob->fetch_assoc()):
+                    $mob_vid = (int)$mob_m['ruolo_visibilita_id'];
+                    $mob_show = true;
+                    if ($mob_vid === -1 && !$u_logged_header) $mob_show = false;
+                    elseif ($mob_vid > 0 && (!$u_logged_header || ($u_ruolo_header !== $mob_vid && !in_array((string)$mob_vid, $u_sec_roles_header) && !$is_admin_header))) $mob_show = false;
+                    if (!$mob_show) continue;
+                    $mob_mid    = $mob_m['id'];
+                    $mob_target = $mob_m['apri_nuova_scheda'] ? 'target="_blank"' : '';
+                    $res_mob_s  = @$conn->query("SELECT * FROM menu_voci WHERE genitore_id = $mob_mid AND (visibile IS NULL OR visibile = 1) ORDER BY ordine ASC");
+                    $mob_has_s  = ($res_mob_s && $res_mob_s->num_rows > 0);
+                    if ($mob_has_s):
+        ?>
+                <div class="mob-nav-group-label"><?php echo htmlspecialchars($mob_m['etichetta']); ?></div>
+                <?php while ($mob_sub = $res_mob_s->fetch_assoc()):
+                    $mob_vsub = (int)$mob_sub['ruolo_visibilita_id'];
+                    $mob_show_s = true;
+                    if ($mob_vsub === -1 && !$u_logged_header) $mob_show_s = false;
+                    elseif ($mob_vsub > 0 && (!$u_logged_header || ($u_ruolo_header !== $mob_vsub && !in_array((string)$mob_vsub, $u_sec_roles_header) && !$is_admin_header))) $mob_show_s = false;
+                    if (!$mob_show_s) continue;
+                    $mob_href_s = (!empty($mob_sub['url']) && $mob_sub['url'] !== '#') ? htmlspecialchars($mob_sub['url']) : '#';
+                    $mob_tgt_s  = $mob_sub['apri_nuova_scheda'] ? 'target="_blank"' : '';
+                ?>
+                    <a href="<?php echo $mob_href_s; ?>" <?php echo $mob_tgt_s; ?> class="mob-nav-link ps-3">
+                        <i class="fa fa-chevron-right me-2" style="font-size:.65rem;color:#B30000;" aria-hidden="true"></i><?php echo htmlspecialchars($mob_sub['etichetta']); ?>
+                    </a>
+                <?php endwhile; ?>
+        <?php else: ?>
+                <a href="<?php echo htmlspecialchars($mob_m['url']); ?>" <?php echo $mob_target; ?> class="mob-nav-link"><?php echo htmlspecialchars($mob_m['etichetta']); ?></a>
+        <?php
+                endif;
+            endwhile;
+            endif;
+        } ?>
+
+        <div class="mob-nav-label mt-3">Accessibilità</div>
+        <div class="d-flex gap-2 mb-3">
+            <button class="btn btn-outline-light btn-sm flex-fill" id="btnZoomInMob" aria-label="Ingrandisci testo">A+</button>
+            <button class="btn btn-outline-light btn-sm flex-fill" id="btnZoomOutMob" aria-label="Riduci testo">A-</button>
+            <button class="btn btn-outline-light btn-sm flex-fill" id="btnContrastMob" aria-label="Attiva Alto Contrasto"><i class="fa fa-adjust" aria-hidden="true"></i></button>
+        </div>
+
+        <div class="mob-nav-label">Account</div>
+        <?php if ($u_logged_header): ?>
+            <div class="mob-nav-user"><i class="fa fa-user-circle me-2" aria-hidden="true"></i><?php echo htmlspecialchars($nome_visualizzato); ?></div>
+            <a href="area_personale.php" class="mob-nav-link"><i class="fa fa-id-card me-2" style="color:#60a5fa;" aria-hidden="true"></i> Area Personale</a>
+            <?php if ($is_admin_header): ?>
+                <a href="admin/index.php" class="mob-nav-link"><i class="fa fa-cogs me-2" style="color:#f59e0b;" aria-hidden="true"></i> Pannello Gestori</a>
+                <a href="checkin.php" target="_blank" class="mob-nav-link"><i class="fa fa-qrcode me-2" style="color:#34d399;" aria-hidden="true"></i> Scanner Check-in</a>
+            <?php endif; ?>
+            <a href="esci.php" class="mob-nav-link" style="color:#f87171;font-weight:bold;"><i class="fa fa-sign-out-alt me-2" aria-hidden="true"></i> Esci</a>
+        <?php else: ?>
+            <a href="saml_login.php" class="mob-nav-link" style="font-weight:bold;"><i class="fa fa-sign-in-alt me-2" style="color:#34d399;" aria-hidden="true"></i> Accedi con SSO</a>
+        <?php endif; ?>
+    </div>
+</div>
+<div id="mobileNavOverlay"></div>
+
+<!-- ============================================================ -->
+<!-- BARRA DI NAVIGAZIONE PRINCIPALE -->
+<!-- ============================================================ -->
 <div class="shadow-sm" style="background-color: #ffffff !important; border-bottom: 1px solid #e2e8f0; position: relative; z-index: 999;">
     <div class="container" style="position: relative;">
         <nav class="navbar navbar-expand-lg px-0 py-1" aria-label="Menu principale" style="background-color: #ffffff !important; position: static;">
-            
-            <button class="navbar-toggler border-0 shadow-none w-100 text-start py-2 d-lg-none" type="button" data-bs-toggle="collapse" data-bs-target="#mainNavbar" aria-controls="mainNavbar" aria-expanded="false" aria-label="Mostra/Nascondi menu">
+
+            <!-- Pulsante hamburger solo mobile: apre il sidebar -->
+            <button class="border-0 bg-transparent shadow-none w-100 text-start py-2 d-lg-none" type="button" id="mobileNavToggle" aria-label="Apri menu di navigazione">
                 <div class="d-flex align-items-center" style="color: #000000 !important;">
                     <i class="fa fa-bars fs-3 me-2" aria-hidden="true"></i>
                     <span class="fs-6" style="font-weight: 400 !important;">Menu di Navigazione</span>
@@ -265,16 +410,7 @@ if ($u_logged_header) {
             </button>
 
             <div class="collapse navbar-collapse" id="mainNavbar">
-                <form action="ricerca.php" method="GET" class="d-flex d-md-none p-3 bg-light border-bottom" role="search">
-                    <div class="input-group">
-                        <input type="text" name="q" class="form-control border-primary" placeholder="Cerca eventi..." aria-label="Cerca eventi" required>
-                        <button class="btn btn-primary" type="submit" aria-label="Avvia ricerca"><i class="fa fa-search" aria-hidden="true"></i></button>
-                    </div>
-                </form>
-
                 <ul class="navbar-nav me-auto mb-2 mb-lg-0 w-100 py-2 py-lg-0">
-                   
-                    
                     <?php
                     if (isset($conn) && $conn instanceof mysqli) {
                         $res_menu = @$conn->query("SELECT * FROM menu_voci WHERE genitore_id = 0 AND (visibile IS NULL OR visibile = 1) ORDER BY ordine ASC");
@@ -284,61 +420,57 @@ if ($u_logged_header) {
                                 $show_menu = true;
                                 if ($v_id === -1 && !$u_logged_header) $show_menu = false;
                                 elseif ($v_id > 0 && (!$u_logged_header || ($u_ruolo_header !== $v_id && !in_array((string)$v_id, $u_sec_roles_header) && !$is_admin_header))) $show_menu = false;
-                                
+
                                 if ($show_menu):
                                     $m_id = $m['id'];
                                     $res_sub = @$conn->query("SELECT * FROM menu_voci WHERE genitore_id = $m_id AND (visibile IS NULL OR visibile = 1) ORDER BY ordine ASC");
                                     $has_sub = ($res_sub && $res_sub->num_rows > 0);
-                                    $target = $m['apri_nuova_scheda'] ? 'target="_blank"' : '';
-                                    
+                                    $target  = $m['apri_nuova_scheda'] ? 'target="_blank"' : '';
+
                                     if ($has_sub):
-                        ?>
+                    ?>
                                         <li class="nav-item dropdown hover-dropdown megamenu-li">
                                             <a class="nav-link px-lg-3" href="#" id="drop<?php echo $m_id; ?>" role="button" data-bs-toggle="dropdown" aria-expanded="false" style="color: #000000 !important; font-weight: 400 !important;">
                                                 <?php echo htmlspecialchars($m['etichetta']); ?> <i class="fa fa-chevron-down ms-1" style="font-size: 0.7rem; color: #B30000;" aria-hidden="true"></i>
                                             </a>
                                             <div class="dropdown-menu megamenu bg-white" aria-labelledby="drop<?php echo $m_id; ?>">
                                                 <div class="row g-4">
-                                                    <?php while ($sub = $res_sub->fetch_assoc()): ?>
-                                                        <?php 
-                                                            $v_id_sub = (int)$sub['ruolo_visibilita_id'];
-                                                            $show_sub = true;
-                                                            if ($v_id_sub === -1 && !$u_logged_header) $show_sub = false;
-                                                            elseif ($v_id_sub > 0 && (!$u_logged_header || ($u_ruolo_header !== $v_id_sub && !in_array((string)$v_id_sub, $u_sec_roles_header) && !$is_admin_header))) $show_sub = false;
-                                                            
-                                                            if ($show_sub):
-                                                                $sub_id = $sub['id'];
-                                                                $res_subsub = @$conn->query("SELECT * FROM menu_voci WHERE genitore_id = $sub_id AND (visibile IS NULL OR visibile = 1) ORDER BY ordine ASC");
-                                                                $has_subsub = ($res_subsub && $res_subsub->num_rows > 0);
-                                                                $target_sub = $sub['apri_nuova_scheda'] ? 'target="_blank"' : '';
-                                                                $header_url = (!empty($sub['url']) && $sub['url'] !== '#') ? htmlspecialchars($sub['url']) : 'javascript:void(0);';
-                                                        ?>
-                                                                <div class="col-md-6 col-lg-3 mb-3">
-                                                                    <a href="<?php echo $header_url; ?>" <?php echo $target_sub; ?> class="megamenu-header pb-2 mb-2" style="border-bottom: 1px solid #e2e8f0;">
-                                                                        <?php echo htmlspecialchars($sub['etichetta']); ?>
-                                                                    </a>
-                                                                    <?php if ($has_subsub): ?>
-                                                                        <ul class="list-unstyled m-0 p-0">
-                                                                            <?php while ($subsub = $res_subsub->fetch_assoc()): ?>
-                                                                                <?php
-                                                                                    $v_id_subsub = (int)$subsub['ruolo_visibilita_id'];
-                                                                                    $show_subsub = true;
-                                                                                    if ($v_id_subsub === -1 && !$u_logged_header) $show_subsub = false;
-                                                                                    elseif ($v_id_subsub > 0 && (!$u_logged_header || ($u_ruolo_header !== $v_id_subsub && !in_array((string)$v_id_subsub, $u_sec_roles_header) && !$is_admin_header))) $show_subsub = false;
-                                                                                    
-                                                                                    if ($show_subsub):
-                                                                                        $target_subsub = $subsub['apri_nuova_scheda'] ? 'target="_blank"' : '';
-                                                                                ?>
-                                                                                    <li>
-                                                                                        <a href="<?php echo htmlspecialchars($subsub['url']); ?>" <?php echo $target_subsub; ?> class="megamenu-link">
-                                                                                            <?php echo htmlspecialchars($subsub['etichetta']); ?>
-                                                                                        </a>
-                                                                                    </li>
-                                                                                <?php endif; endwhile; ?>
-                                                                        </ul>
-                                                                    <?php endif; ?>
-                                                                </div>
-                                                        <?php endif; endwhile; ?>
+                                                    <?php while ($sub = $res_sub->fetch_assoc()):
+                                                        $v_id_sub  = (int)$sub['ruolo_visibilita_id'];
+                                                        $show_sub  = true;
+                                                        if ($v_id_sub === -1 && !$u_logged_header) $show_sub = false;
+                                                        elseif ($v_id_sub > 0 && (!$u_logged_header || ($u_ruolo_header !== $v_id_sub && !in_array((string)$v_id_sub, $u_sec_roles_header) && !$is_admin_header))) $show_sub = false;
+                                                        if (!$show_sub) continue;
+                                                        $sub_id     = $sub['id'];
+                                                        $res_subsub = @$conn->query("SELECT * FROM menu_voci WHERE genitore_id = $sub_id AND (visibile IS NULL OR visibile = 1) ORDER BY ordine ASC");
+                                                        $has_subsub = ($res_subsub && $res_subsub->num_rows > 0);
+                                                        $target_sub = $sub['apri_nuova_scheda'] ? 'target="_blank"' : '';
+                                                        $header_url = (!empty($sub['url']) && $sub['url'] !== '#') ? htmlspecialchars($sub['url']) : 'javascript:void(0);';
+                                                    ?>
+                                                        <div class="col-md-6 col-lg-3 mb-3">
+                                                            <a href="<?php echo $header_url; ?>" <?php echo $target_sub; ?> class="megamenu-header pb-2 mb-2" style="border-bottom: 1px solid #e2e8f0;">
+                                                                <?php echo htmlspecialchars($sub['etichetta']); ?>
+                                                            </a>
+                                                            <?php if ($has_subsub): ?>
+                                                                <ul class="list-unstyled m-0 p-0">
+                                                                    <?php while ($subsub = $res_subsub->fetch_assoc()):
+                                                                        $v_id_subsub  = (int)$subsub['ruolo_visibilita_id'];
+                                                                        $show_subsub  = true;
+                                                                        if ($v_id_subsub === -1 && !$u_logged_header) $show_subsub = false;
+                                                                        elseif ($v_id_subsub > 0 && (!$u_logged_header || ($u_ruolo_header !== $v_id_subsub && !in_array((string)$v_id_subsub, $u_sec_roles_header) && !$is_admin_header))) $show_subsub = false;
+                                                                        if (!$show_subsub) continue;
+                                                                        $target_subsub = $subsub['apri_nuova_scheda'] ? 'target="_blank"' : '';
+                                                                    ?>
+                                                                        <li>
+                                                                            <a href="<?php echo htmlspecialchars($subsub['url']); ?>" <?php echo $target_subsub; ?> class="megamenu-link">
+                                                                                <?php echo htmlspecialchars($subsub['etichetta']); ?>
+                                                                            </a>
+                                                                        </li>
+                                                                    <?php endwhile; ?>
+                                                                </ul>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                    <?php endwhile; ?>
                                                 </div>
                                             </div>
                                         </li>
@@ -349,30 +481,8 @@ if ($u_logged_header) {
                                     <?php endif; ?>
                                 <?php endif; ?>
                             <?php endwhile; ?>
-                        <?php endif; 
+                        <?php endif;
                     } ?>
-                    
-                    <li class="nav-item d-lg-none border-top mt-3 pt-3">
-                        
-                        <div class="px-3 mb-2 mt-2 text-muted small fw-bold text-uppercase">Accessibilità Visiva</div>
-                        <div class="px-3 mb-3 d-flex gap-2">
-                            <button class="btn btn-outline-dark btn-sm flex-fill" id="btnZoomInMob" aria-label="Ingrandisci testo">A+</button>
-                            <button class="btn btn-outline-dark btn-sm flex-fill" id="btnZoomOutMob" aria-label="Riduci testo">A-</button>
-                            <button class="btn btn-dark btn-sm flex-fill" id="btnContrastMob" aria-label="Attiva Alto Contrasto"><i class="fa fa-adjust" aria-hidden="true"></i></button>
-                        </div>
-
-                        <div class="px-3 mb-2 text-muted small fw-bold text-uppercase">Account</div>
-                        <?php if ($u_logged_header): ?>
-                            <a class="nav-link" href="area_personale.php" style="color: #000000 !important; font-weight: 400 !important;"><i class="fa fa-user me-2 text-primary" aria-hidden="true"></i> Area Personale</a>
-                            <?php if ($is_admin_header): ?>
-                                <a class="nav-link" href="admin/index.php" style="color: #000000 !important; font-weight: 400 !important;"><i class="fa fa-cogs me-2 text-danger" aria-hidden="true"></i> Pannello Gestori</a>
-                                <a class="nav-link" href="checkin.php" target="_blank" style="color: #000000 !important; font-weight: 400 !important;"><i class="fa fa-qrcode me-2 text-success" aria-hidden="true"></i> Scanner Check-in</a>
-                            <?php endif; ?>
-                            <a class="nav-link text-danger mt-2" href="esci.php" style="font-weight: bold !important;"><i class="fa fa-sign-out-alt me-2" aria-hidden="true"></i> Esci / Disconnetti</a>
-                        <?php else: ?>
-                            <a class="nav-link" href="saml_login.php" style="color: #000000 !important; font-weight: bold !important;"><i class="fa fa-sign-in-alt me-2 text-primary" aria-hidden="true"></i> Accedi</a>
-                        <?php endif; ?>
-                    </li>
                 </ul>
             </div>
         </nav>
@@ -407,5 +517,23 @@ document.addEventListener("DOMContentLoaded", function() {
     const zoomOut = () => { if (zoomLevel > 90) { zoomLevel -= 10; updateA11y(); } };
     document.getElementById('btnZoomOut')?.addEventListener('click', zoomOut);
     document.getElementById('btnZoomOutMob')?.addEventListener('click', zoomOut);
+
+    // Mobile sidebar
+    const mobileNav     = document.getElementById('mobileNav');
+    const mobileOverlay = document.getElementById('mobileNavOverlay');
+    function openMobileNav() {
+        mobileNav?.classList.add('active');
+        mobileOverlay?.classList.add('active');
+        document.body.style.overflow = 'hidden';
+    }
+    function closeMobileNav() {
+        mobileNav?.classList.remove('active');
+        mobileOverlay?.classList.remove('active');
+        document.body.style.overflow = '';
+    }
+    document.getElementById('mobileNavToggle')?.addEventListener('click', openMobileNav);
+    document.getElementById('mobileNavClose')?.addEventListener('click', closeMobileNav);
+    mobileOverlay?.addEventListener('click', closeMobileNav);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMobileNav(); });
 });
 </script>
