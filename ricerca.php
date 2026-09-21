@@ -13,31 +13,7 @@ $q_raw = trim($_GET['q'] ?? '');
 $q_safe = htmlspecialchars($q_raw);
 $q_like = '%' . $q_raw . '%';
 
-$risultati = [];
-
-if (!empty($q_raw)) {
-    // Eseguiamo la ricerca incrociata tra eventi attivi e archiviati
-    // Limitiamo la ricerca alle Aree di lavoro VISIBILI
-    $sql = "SELECT e.*, 
-            pe.titolo as nome_area, pe.slug as slug_area, pe.colore_primario,
-            (SELECT MIN(data_turno) FROM turni WHERE evento_id = e.id AND data_turno >= CURDATE()) as prossima_data
-            FROM eventi e
-            JOIN pagine_eventi pe ON e.pagina_id = pe.id
-            WHERE pe.visibile = 1 
-            AND (e.titolo LIKE ? OR e.descrizione LIKE ? OR e.luogo LIKE ?)
-            ORDER BY e.archiviato ASC, prossima_data ASC";
-            
-    $stmt = $conn->prepare($sql);
-    $stmt->bind_param("sss", $q_like, $q_like, $q_like);
-    $stmt->execute();
-    $res = $stmt->get_result();
-    
-    if ($res) {
-        while ($row = $res->fetch_assoc()) {
-            $risultati[] = $row;
-        }
-    }
-}
+$risultati = !empty($q_raw) ? cerca_eventi($conn, $q_raw) : [];
 ?>
 
 <div class="container my-5">

@@ -447,6 +447,30 @@ if (!function_exists('get_configurazione_portale')) {
     }
 }
 
+// =======================================================================
+// RICERCA GLOBALE
+// =======================================================================
+if (!function_exists('cerca_eventi')) {
+    function cerca_eventi($conn, string $q): array {
+        $q_like = '%' . $q . '%';
+        $sql = "SELECT e.*,
+                    pe.titolo as nome_area, pe.slug as slug_area, pe.colore_primario,
+                    (SELECT MIN(data_turno) FROM turni WHERE evento_id = e.id AND data_turno >= CURDATE()) as prossima_data
+                FROM eventi e
+                JOIN pagine_eventi pe ON e.pagina_id = pe.id
+                WHERE pe.visibile = 1
+                  AND (e.titolo LIKE ? OR e.descrizione LIKE ? OR e.luogo LIKE ?)
+                ORDER BY e.archiviato ASC, prossima_data ASC";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("sss", $q_like, $q_like, $q_like);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $rows = [];
+        if ($res) { while ($row = $res->fetch_assoc()) { $rows[] = $row; } }
+        return $rows;
+    }
+}
+
 // Da chiamare subito dopo ogni UPDATE/INSERT su configurazione_portale
 // (oggi solo in admin/testata.php), così le nuove impostazioni sono visibili
 // immediatamente invece di aspettare la scadenza naturale della cache.
