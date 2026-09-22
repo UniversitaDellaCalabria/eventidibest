@@ -258,9 +258,8 @@ $nomi_ruoli = [-1 => 'Utenti Autenticati', 1 => 'Amministratore', 2 => 'Gestore 
 $etichette_riservato = [-1 => 'Riservato Utenti Autenticati', 1 => 'Riservato Amministratori', 2 => 'Riservato Gestori', 3 => 'Riservato Studenti', 4 => 'Riservato Dipendenti', 5 => 'Riservato Esterni'];
 
 // ESTRAZIONE DATI
-$sottocategorie = []; $categorie_nomi = [];
-$res_sub = $conn->query("SELECT * FROM sottocategorie WHERE pagina_id = $p_id ORDER BY ordine ASC, id ASC");
-if ($res_sub) { while ($sub = $res_sub->fetch_assoc()) { $sottocategorie[] = $sub; $categorie_nomi[] = $sub['nome']; } }
+$sottocategorie = get_sottocategorie($conn, $p_id);
+$categorie_nomi = array_column($sottocategorie, 'nome');
 
 $evento_evidenza = null; 
 $all_turni_flat = []; 
@@ -396,8 +395,25 @@ if (!function_exists('renderCardUniversal')) {
             echo '</div>';
         } elseif (!empty($ev['turni'])) {
             echo '<div class="card-footer bg-light border-top-0 p-2">';
+            // Badge disponibilità aggregata (calcolato prima del bottone)
+            $posti_badge_disp = 0; $badge_has_waitlist = false; $badge_all_ended = true;
+            foreach ($ev['turni'] as $_bt) {
+                $now_bt = date('Y-m-d H:i:s');
+                $dt_fine_bt = $_bt['data_turno'] . ' ' . (!empty($_bt['orario_fine']) ? substr($_bt['orario_fine'], 0, 8) : '23:59:59');
+                if ($now_bt <= $dt_fine_bt) {
+                    $badge_all_ended = false;
+                    $_occ_bt = getPostiOccupati($conn, $_bt['id']);
+                    $_disp_bt = $_bt['max_posti'] - $_occ_bt;
+                    if ($_disp_bt <= 0 && !empty($_bt['abilita_lista_attesa'])) $badge_has_waitlist = true;
+                    $posti_badge_disp += max(0, $_disp_bt);
+                }
+            }
+            if ($posti_badge_disp > 0) $badge_disp_html = '<span class="badge bg-success ms-2" style="font-size:0.72rem;font-weight:600;">'.$posti_badge_disp.' '.($posti_badge_disp == 1 ? 'posto libero' : 'posti liberi').'</span>';
+            elseif ($badge_has_waitlist) $badge_disp_html = '<span class="badge bg-warning text-dark ms-2" style="font-size:0.72rem;font-weight:600;">Lista d\'Attesa</span>';
+            elseif ($badge_all_ended) $badge_disp_html = '<span class="badge bg-secondary ms-2" style="font-size:0.72rem;font-weight:600;">Concluso</span>';
+            else $badge_disp_html = '<span class="badge bg-danger ms-2" style="font-size:0.72rem;font-weight:600;">Posti Esauriti</span>';
             echo '<button class="btn btn-light w-100 d-flex justify-content-between align-items-center fw-bold py-2 px-3 text-primary border-0 collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#'.$collapse_id.'" aria-expanded="false">';
-            echo '<span style="font-size: 0.95rem; letter-spacing: 0.5px; color: '.$col_primaria.';">📅 TURNI DISPONIBILI ('.count($ev['turni']).')</span><i class="fa fa-chevron-down" style="color: '.$col_primaria.';"></i></button>';
+            echo '<span class="d-flex align-items-center" style="font-size: 0.95rem; letter-spacing: 0.5px; color: '.$col_primaria.';">📅 TURNI DISPONIBILI ('.count($ev['turni']).')'.$badge_disp_html.'</span><i class="fa fa-chevron-down" style="color: '.$col_primaria.';"></i></button>';
             echo '<div class="collapse mt-2" id="'.$collapse_id.'"><div class="d-flex flex-column gap-3 p-2">';
             
             foreach ($ev['turni'] as $t) {
@@ -801,17 +817,18 @@ require_once 'header.php';
                             ?>
                             <div class="card shadow-sm border-0 adv-event-item" style="border-radius: 12px; overflow: hidden;" data-text="<?php echo htmlspecialchars($data_text); ?>" data-cat="<?php echo htmlspecialchars($data_cat); ?>" data-date="<?php echo $data_date; ?>" data-soldout="<?php echo $is_soldout_flag; ?>">
                                 <div class="row g-0">
-                                    <div class="col-md-3 d-flex flex-column align-items-center justify-content-center text-white p-3" style="background-color: <?php echo $col_primaria; ?>; min-height: 140px;">
-                                        <?php if (!empty($t_flat['evento_locandina']) && preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $t_flat['evento_locandina'])): ?>
-                                            <img src="<?php echo htmlspecialchars($t_flat['evento_locandina']); ?>" class="img-fluid rounded shadow-sm mb-2" style="max-height: 80px;" alt="Logo Evento">
-                                        <?php else: ?>
-                                            <i class="fa fa-tag fs-2 mb-2 opacity-75"></i>
-                                            <h6 class="fw-bold m-0 text-center text-uppercase lh-base" style="letter-spacing: 1px;">
-                                                <?php echo htmlspecialchars($t_flat['categoria']); ?>
-                                            </h6>
-                                        <?php endif; ?>
+                                    <?php if (!empty($t_flat['evento_locandina']) && preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $t_flat['evento_locandina'])): ?>
+                                    <div class="col-md-2 position-relative" style="min-height: 150px;">
+                                        <img src="<?php echo htmlspecialchars($t_flat['evento_locandina']); ?>" alt="Locandina" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;object-position:center;">
                                     </div>
-                                    <div class="col-md-9 p-4 d-flex flex-column justify-content-between bg-white">
+                                    <?php else: ?>
+                                    <div class="col-md-2 d-flex flex-column align-items-center justify-content-center text-white" style="background-color:<?php echo $col_primaria; ?>;min-height:150px;">
+                                        <i class="fa fa-calendar-star fs-2 opacity-75 mb-1"></i>
+                                        <span class="small fw-bold text-uppercase text-center px-2 lh-sm" style="letter-spacing:0.5px;font-size:0.7rem!important;"><?php echo htmlspecialchars($t_flat['categoria']); ?></span>
+                                    </div>
+                                    <?php endif; ?>
+
+                                    <div class="col-md-10 p-4 d-flex flex-column justify-content-between bg-white">
                                         <div>
                                             <div class="small fw-bold mb-1" style="color: #64748b;"><i class="fa fa-folder-open me-1"></i> <?php echo htmlspecialchars($t_flat['categoria']); ?></div>
                                             <h4 class="fw-bold text-dark mb-2" style="color: <?php echo $col_primaria; ?> !important;"><?php echo htmlspecialchars($t_flat['evento_titolo']); ?></h4>

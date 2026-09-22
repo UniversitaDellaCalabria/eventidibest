@@ -404,17 +404,8 @@ foreach ($righe_prenotazioni as $row) {
 }
 
 // RECUPERO TUTTI I MESSAGGI PER LE PRENOTAZIONI DELL'UTENTE
-$all_pr_ids = array_merge(array_column($prenotazioni_attive, 'id'), array_column($prenotazioni_passate, 'id'));
-$messaggi_per_pr = [];
-if (!empty($all_pr_ids)) {
-    $ids_str = implode(',', $all_pr_ids);
-    $res_msg = $conn->query("SELECT * FROM messaggi_prenotazioni WHERE prenotazione_id IN ($ids_str) ORDER BY data_invio ASC");
-    if ($res_msg) {
-        while($m = $res_msg->fetch_assoc()) {
-            $messaggi_per_pr[$m['prenotazione_id']][] = $m;
-        }
-    }
-}
+$all_pr_ids     = array_merge(array_column($prenotazioni_attive, 'id'), array_column($prenotazioni_passate, 'id'));
+$messaggi_per_pr = get_messaggi_per_prenotazioni($conn, $all_pr_ids);
 
 // Stats rapide per l'header
 $all_pr_merged = array_merge($prenotazioni_attive, $prenotazioni_passate);

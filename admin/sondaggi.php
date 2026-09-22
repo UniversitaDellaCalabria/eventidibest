@@ -20,6 +20,7 @@ $url_suffix = $is_archivio ? "&archivio=1" : "";
 // ==============================================================================
 
 if (isset($_POST['export_sondaggio_xls'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
     $sond_id_exp = (int)$_POST['sondaggio_id_export'];
     $domande_exp = [];
     $res_d_exp = $conn->query("SELECT id, testo_domanda, tipo FROM sondaggi_domande WHERE sondaggio_id = $sond_id_exp ORDER BY ordine ASC, id ASC");
@@ -69,6 +70,7 @@ if (isset($_POST['export_sondaggio_xls'])) {
 // AZIONI DI MODIFICA CONSENTITE SOLO SE NON ARCHIVIATO
 if (!$is_archivio) {
     if (isset($_POST['add_sondaggio'])) {
+        csrf_verify($_POST['csrf_token'] ?? '');
         $ev_id = (int)$_POST['evento_id'];
         $titolo = $conn->real_escape_string($_POST['titolo_sondaggio']);
         $conn->query("INSERT INTO sondaggi (evento_id, titolo, attivo) VALUES ($ev_id, '$titolo', 0)");
@@ -77,6 +79,7 @@ if (!$is_archivio) {
     }
 
     if (isset($_POST['add_domanda_sondaggio'])) {
+        csrf_verify($_POST['csrf_token'] ?? '');
         $s_id = (int)$_POST['sondaggio_id'];
         $ev_id = (int)$_POST['evento_id'];
         $testo = $conn->real_escape_string($_POST['testo_domanda']);
@@ -121,6 +124,7 @@ if (!$is_archivio) {
     }
 
     if (isset($_POST['invia_mail_sondaggi'])) {
+        csrf_verify($_POST['csrf_token'] ?? '');
         $ev_id = (int)$_POST['evento_id'];
         
         $check_col = $conn->query("SHOW COLUMNS FROM prenotazioni LIKE 'token_sondaggio'");
@@ -301,6 +305,7 @@ if ($f_sond_ev > 0) {
                 <?php if (!$is_archivio): ?>
                     <p class="text-secondary mb-3">Creando un questionario di gradimento, gli studenti potranno valutarlo in forma totalmente anonima.</p>
                     <form method="POST" class="d-flex flex-column align-items-center">
+                        <?php csrf_field(); ?>
                         <input type="hidden" name="evento_id" value="<?php echo $f_sond_ev; ?>">
                         <input type="text" name="titolo_sondaggio" class="form-control mb-2" style="max-width: 400px;" placeholder="Es. Valutazione Evento" required>
                         <button type="submit" name="add_sondaggio" class="btn btn-success fw-bold"><i class="fa fa-plus me-1"></i> Crea e Configura Sondaggio</button>
@@ -345,6 +350,7 @@ if ($f_sond_ev > 0) {
                 <?php if (!$is_archivio): ?>
                 <!-- FORM AGGIUNGI DOMANDA -->
                 <form method="POST" class="row g-2 mb-4 bg-white p-3 border rounded shadow-sm">
+                    <?php csrf_field(); ?>
                     <h6 class="fw-bold text-success mb-2 w-100"><i class="fa fa-plus-circle me-1"></i> Aggiungi Domanda al Questionario</h6>
                     <input type="hidden" name="sondaggio_id" value="<?php echo $curr_sondaggio['id']; ?>">
                     <input type="hidden" name="evento_id" value="<?php echo $f_sond_ev; ?>">
@@ -432,6 +438,7 @@ if ($f_sond_ev > 0) {
                 <div class="d-flex justify-content-between align-items-center mb-3 border-bottom pb-2">
                     <h5 class="fw-bold text-primary m-0"><i class="fa fa-chart-line me-1"></i> Risultati e Statistiche del Questionario</h5>
                     <form method="POST" class="m-0">
+                        <?php csrf_field(); ?>
                         <input type="hidden" name="sondaggio_id_export" value="<?php echo $curr_sondaggio['id']; ?>">
                         <button type="submit" name="export_sondaggio_xls" class="btn btn-success fw-bold shadow-sm">
                             <i class="fa fa-file-excel me-1"></i> Esporta in Excel
@@ -521,6 +528,7 @@ if ($f_sond_ev > 0) {
                 <!-- BOTTONE MANUALE INVIO MAIL SONDAGGIO A TUTTI GLI ISCRITTI DELL'EVENTO -->
                 <?php if(!$is_archivio && $curr_sondaggio['attivo']): ?>
                 <form method="POST" class="mt-4 border-top pt-4 text-end" onsubmit="return confirm('Vuoi inviare una mail con l\'invito al sondaggio a TUTTI gli iscritti confermati di questo evento?');">
+                    <?php csrf_field(); ?>
                     <input type="hidden" name="evento_id" value="<?php echo $f_sond_ev; ?>">
                     <button type="submit" name="invia_mail_sondaggi" class="btn btn-warning btn-lg fw-bold text-dark shadow-sm">
                         <i class="fa fa-paper-plane me-1"></i> Invia Invito al Sondaggio a Tutti

@@ -227,13 +227,8 @@ if (isset($_POST['del_turno'])) {
     admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
 }
 
-$sottocategorie = []; 
-$res_sub = $conn->query("SELECT * FROM sottocategorie WHERE pagina_id = $filtro_p ORDER BY ordine ASC"); 
-if($res_sub) { while($r = $res_sub->fetch_assoc()) $sottocategorie[] = $r; }
-
-$ruoli = [];
-$res_ru = $conn->query("SELECT * FROM ruoli ORDER BY id ASC"); 
-if ($res_ru) { while($r = $res_ru->fetch_assoc()) $ruoli[] = $r; }
+$sottocategorie = get_sottocategorie($conn, $filtro_p);
+$ruoli          = get_ruoli($conn);
 
 $eventi = []; $tutti_gli_eventi = [];
 $filtro_ev = isset($_GET['f_ev']) ? (int)$_GET['f_ev'] : 0;

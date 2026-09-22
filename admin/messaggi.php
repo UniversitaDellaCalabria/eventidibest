@@ -36,15 +36,34 @@ if (isset($_POST['invia_risposta_inbox'])) {
         $stmt_msg->execute();
 
         // Notifica Email
-        // Notifica Email
         if (!empty($email_dest)) {
             $url_area = "https://dibest2.unical.it/eventi/area_personale.php";
-            $oggetto = "Nuova risposta - Evento: " . $ev_titolo;
-            $body_mail = "<p>L'amministrazione ha risposto al tuo messaggio per l'evento <strong>$ev_titolo</strong>:</p>
-                          <div style='background:#f8fafc; padding:15px; border-left:4px solid #B80000; margin-bottom:20px; font-style:italic;'>
-                            $messaggio_html
-                          </div>
-                          <p><a href='$url_area' style='background-color:#B80000; color:#ffffff; padding:12px 25px; text-decoration:none; border-radius:6px; display:inline-block; font-weight:bold; font-family:sans-serif;'>Vai all'Area Personale</a></p>";
+
+            $nome_operatore = 'Segreteria DiBEST';
+            $stmt_op = $conn->prepare("SELECT nome, cognome FROM utenti WHERE id = ? LIMIT 1");
+            $stmt_op->bind_param("i", $admin_id);
+            $stmt_op->execute();
+            $res_op = $stmt_op->get_result();
+            if ($res_op && $op = $res_op->fetch_assoc()) {
+                $nome_operatore = trim($op['nome'] . ' ' . $op['cognome']);
+            }
+
+            $oggetto   = "Nuovo messaggio da " . $nome_operatore . " – " . $ev_titolo . " [" . date('d/m H:i') . "]";
+            $body_mail = "
+                <p>Hai ricevuto un nuovo messaggio da <strong>" . htmlspecialchars($nome_operatore) . "</strong>
+                riguardante l'evento <strong>" . htmlspecialchars($ev_titolo) . "</strong>:</p>
+                <div style='background:#f8fafc; padding:15px; border-left:4px solid #B80000; margin:15px 0; font-style:italic;'>
+                    $messaggio_html
+                </div>
+                <p>Accedi alla tua Area Personale per leggere il messaggio completo e rispondere:</p>
+                <p>
+                    <a href='$url_area' style='background-color:#B80000; color:#ffffff; padding:12px 25px;
+                       text-decoration:none; border-radius:6px; display:inline-block;
+                       font-weight:bold; font-family:sans-serif;'>
+                        Vai all'Area Personale per rispondere
+                    </a>
+                </p>
+                <p style='color:#6c757d; font-size:0.9em;'>Cordiali saluti,<br>" . htmlspecialchars($nome_operatore) . "<br>Segreteria DiBEST</p>";
             inviaNotificaEmail($email_dest, $oggetto, $body_mail, $conn);
         }
         flash_set("✅ Risposta inviata con successo.");
@@ -62,29 +81,7 @@ if (isset($_GET['segna_letto'])) {
 
 // 3. ESTRAZIONE DI TUTTE LE CONVERSAZIONI (Filtrate per Area e Permessi)
 $pr_filter_sql = (!$is_full_admin && !$can_manage_iscritti) ? " AND FIND_IN_SET($u_id_curr, e.gestori_utenti_ids) > 0 " : "";
-
-// Aggiunto e.pagina_id = $filtro_p per limitare i messaggi all'area selezionata
-$sql_inbox = "SELECT 
-                p.id as prenotazione_id, p.codice_prenotazione, p.nome, p.cognome, p.email,
-                e.titolo as evento_titolo, e.pagina_id,
-                MAX(m.data_invio) as ultimo_messaggio_data,
-                COUNT(m.id) as totale_messaggi,
-                SUM(CASE WHEN m.letto = 0 AND m.mittente_tipo = 'utente' THEN 1 ELSE 0 END) as messaggi_da_leggere
-              FROM messaggi_prenotazioni m
-              JOIN prenotazioni p ON m.prenotazione_id = p.id
-              JOIN turni t ON p.turno_id = t.id
-              JOIN eventi e ON t.evento_id = e.id
-              WHERE e.pagina_id = $filtro_p $pr_filter_sql
-              GROUP BY p.id
-              ORDER BY messaggi_da_leggere DESC, ultimo_messaggio_data DESC";
-
-$conversazioni = [];
-$res_inbox = $conn->query($sql_inbox);
-if ($res_inbox) {
-    while ($row = $res_inbox->fetch_assoc()) {
-        $conversazioni[] = $row;
-    }
-}
+$conversazioni = get_inbox_conversazioni($conn, $filtro_p, $pr_filter_sql);
 ?>
 
 <h4 class="fw-bold text-dark mb-4"><i class="fa fa-envelope-open-text text-danger me-2"></i> Tutti i Messaggi (Inbox)</h4>

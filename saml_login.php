@@ -31,27 +31,23 @@ unset($_saml_env);
 if (file_exists($simplesaml_path)) {
     require_once($simplesaml_path);
 
-    // Salviamo nome e ID della nostra sessione PHP (quella che il browser conosce)
-    // PRIMA che requireAuth() la sostituisca con la sessione interna di SimpleSAML.
+    // Salviamo nome e ID della nostra sessione PRIMA che SimpleSAML possa chiuderla
     $our_session_name = session_name();
     $our_session_id   = session_id();
 
     $as = new \SimpleSAML\Auth\Simple('default-sp');
     $as->requireAuth();
 
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        session_write_close();
+    // Ripristina la nostra sessione PHP (pattern LibreBooking adSAML::Cleanup)
+    \SimpleSAML\Session::getSessionFromRequest()->cleanup();
+
+    // cleanup() può chiudere la sessione: la riapriamo esplicitamente
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        session_name($our_session_name);
+        session_id($our_session_id);
+        session_set_cookie_params(['lifetime'=>0,'path'=>'/','secure'=>true,'httponly'=>true,'samesite'=>'Lax']);
+        session_start();
     }
-    session_name($our_session_name);
-    session_id($our_session_id);
-    session_set_cookie_params([
-        'lifetime' => 0,
-        'path'     => '/',
-        'secure'   => true,
-        'httponly' => true,
-        'samesite' => 'Lax',
-    ]);
-    session_start();
 
     $attributes = $as->getAttributes();
     
@@ -141,6 +137,16 @@ if (file_exists($simplesaml_path)) {
         $_SESSION['utente_nome']     = trim($u_info['nome'] . ' ' . $u_info['cognome']);
         $_SESSION['utente_email']    = $u_info['email'];
         $_SESSION['utente_ruolo_id'] = (int)$u_info['ruolo_id'];
+
+        // Registra accesso (usa registra_accesso_sso che crea la tabella autonomamente)
+        if (empty($_SESSION['accesso_sso_loggato']) && function_exists('registra_accesso_sso')) {
+            try {
+                registra_accesso_sso($conn, (int)$u_info['id'], $u_info['email'], $u_info['nome'], $u_info['cognome'], 'sso');
+                $_SESSION['accesso_sso_loggato'] = 1;
+            } catch (\Throwable $e) {
+                error_log('[SSO] Errore log accesso: ' . $e->getMessage());
+            }
+        }
 
         session_write_close();
     }

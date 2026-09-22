@@ -83,105 +83,47 @@ if (isset($_GET['export_csv']) || isset($_GET['export_excel'])) {
 // ============================================================================
 // 2. CALCOLO KPI (Dati Riassuntivi in Alto)
 // ============================================================================
-$kpi_confermate = 0;
-$kpi_attesa = 0;
-$kpi_scadute_rifiutate = 0;
-$kpi_capienza_totale = 0;
-
-$sql_kpi = "SELECT 
-              SUM(CASE WHEN p.stato IN ('confermata', 'richiesta_conferma') THEN p.num_posti ELSE 0 END) as tot_confermate,
-              SUM(CASE WHEN p.stato = 'in_attesa' THEN p.num_posti ELSE 0 END) as tot_attesa,
-              SUM(CASE WHEN p.stato IN ('scaduta', 'rifiutata') THEN p.num_posti ELSE 0 END) as tot_perse
-            FROM prenotazioni p
-            JOIN turni t ON p.turno_id = t.id
-            JOIN eventi e ON t.evento_id = e.id
-            JOIN pagine_eventi pe ON e.pagina_id = pe.id
-            WHERE e.pagina_id = $filtro_p $sql_filtro_eventi_rbac";
-            
-$res_kpi = $conn->query($sql_kpi);
-if ($res_kpi && $row = $res_kpi->fetch_assoc()) {
-    $kpi_confermate = (int)$row['tot_confermate'];
-    $kpi_attesa = (int)$row['tot_attesa'];
-    $kpi_scadute_rifiutate = (int)$row['tot_perse'];
-}
-
-$sql_capienza = "SELECT SUM(t.max_posti) as capienza_max 
-                 FROM turni t 
-                 JOIN eventi e ON t.evento_id = e.id 
-                 JOIN pagine_eventi pe ON e.pagina_id = pe.id
-                 WHERE e.pagina_id = $filtro_p $sql_filtro_eventi_rbac AND t.max_posti < 9000";
-$res_cap = $conn->query($sql_capienza);
-if ($res_cap && $row_cap = $res_cap->fetch_assoc()) {
-    $kpi_capienza_totale = (int)$row_cap['capienza_max'];
-}
+$kpi = get_kpi_statistiche($conn, $filtro_p, $sql_filtro_eventi_rbac);
+$kpi_confermate        = $kpi['confermate'];
+$kpi_attesa            = $kpi['attesa'];
+$kpi_scadute_rifiutate = $kpi['perse'];
+$kpi_capienza_totale   = $kpi['capienza'];
 
 // ============================================================================
 // 3. DATI PER I GRAFICI E PER LA TABELLA DETTAGLIATA
 // ============================================================================
-$nomi_eventi = [];
-$posti_occupati_eventi = [];
-$capienza_eventi = [];
-$stats_turni = []; 
+$grafico             = get_dati_grafico_eventi($conn, $filtro_p, $sql_filtro_eventi_rbac);
+$nomi_eventi         = $grafico['nomi'];
+$posti_occupati_eventi = $grafico['occupati'];
+$capienza_eventi     = $grafico['capienza'];
 
-$sql_grafico_eventi = "SELECT e.id, e.titolo, 
-                       COALESCE((SELECT SUM(max_posti) FROM turni WHERE evento_id = e.id AND max_posti < 9000), 0) as cap_max
-                       FROM eventi e 
-                       JOIN pagine_eventi pe ON e.pagina_id = pe.id
-                       WHERE e.pagina_id = $filtro_p $sql_filtro_eventi_rbac
-                       ORDER BY e.id ASC";
-$res_ge = $conn->query($sql_grafico_eventi);
-if ($res_ge) {
-    while ($ev = $res_ge->fetch_assoc()) {
-        $ev_id = $ev['id'];
-        $sql_occ = "SELECT COALESCE(SUM(p.num_posti), 0) as occupati 
-                    FROM prenotazioni p JOIN turni t ON p.turno_id = t.id 
-                    WHERE t.evento_id = $ev_id AND p.stato IN ('confermata', 'richiesta_conferma')";
-        $occ = $conn->query($sql_occ)->fetch_assoc()['occupati'];
-        
-        $titolo_corto = mb_strlen($ev['titolo']) > 25 ? mb_substr($ev['titolo'], 0, 22) . '...' : $ev['titolo'];
-        
-        if ($occ > 0 || $ev['cap_max'] > 0) {
-            $nomi_eventi[] = '"' . addslashes($titolo_corto) . '"';
-            $posti_occupati_eventi[] = $occ;
-            $capienza_eventi[] = $ev['cap_max'];
-        }
-    }
-}
-
-$sql_turni = "SELECT 
-                e.titolo as evento_titolo, 
-                t.id as turno_id,
-                t.data_turno, 
-                t.orario_inizio, 
-                t.orario_fine,
-                t.max_posti,
-                COALESCE(SUM(CASE WHEN p.stato IN ('confermata', 'richiesta_conferma') THEN p.num_posti ELSE 0 END), 0) as confermati,
-                COALESCE(SUM(CASE WHEN p.stato = 'in_attesa' THEN p.num_posti ELSE 0 END), 0) as attesa
-              FROM turni t
-              JOIN eventi e ON t.evento_id = e.id
-              JOIN pagine_eventi pe ON e.pagina_id = pe.id
-              LEFT JOIN prenotazioni p ON p.turno_id = t.id
-              WHERE e.pagina_id = $filtro_p $sql_filtro_eventi_rbac
-              GROUP BY t.id
-              ORDER BY t.data_turno ASC, t.orario_inizio ASC";
-
-$res_turni = $conn->query($sql_turni);
-if ($res_turni) {
-    while ($row = $res_turni->fetch_assoc()) {
-        $stats_turni[] = $row;
-    }
-}
+$stats_turni = get_stats_turni($conn, $filtro_p, $sql_filtro_eventi_rbac);
 ?>
 
-<div class="d-flex justify-content-between align-items-center mb-4">
+<style>
+@media print {
+    /* override: #wrapper ha classe no-print, lo rendiamo visibile */
+    #wrapper { display: block !important; }
+    #sidebar, #sidebarOverlay, .navbar, .btn, .no-print { display: none !important; }
+    /* eccetto il content wrapper che deve restare visibile */
+    #page-content-wrapper { display: block !important; margin: 0 !important; padding: 0 !important; width: 100% !important; }
+    body { font-size: 11px; }
+    canvas { max-width: 100% !important; }
+}
+</style>
+
+<div class="d-flex justify-content-between align-items-start align-items-md-center flex-wrap gap-3 mb-4">
     <h4 class="fw-bold text-dark m-0"><i class="fa fa-chart-pie text-primary me-2"></i> Statistiche & Report - <?php echo htmlspecialchars($page_cfg['titolo'] ?? 'Area'); ?></h4>
-    <div>
-        <a href="?p_id=<?php echo $filtro_p; ?>&export_csv=1" class="btn btn-outline-secondary fw-bold shadow-sm me-2">
+    <div class="d-flex flex-wrap gap-2">
+        <a href="?p_id=<?php echo $filtro_p; ?>&export_csv=1" class="btn btn-outline-secondary fw-bold shadow-sm">
             <i class="fa fa-file-csv me-1"></i> Scarica CSV
         </a>
         <a href="?p_id=<?php echo $filtro_p; ?>&export_excel=1" class="btn btn-success fw-bold shadow-sm" style="background-color: #198754; border: none;">
             <i class="fa fa-file-excel me-1"></i> Esporta Excel
         </a>
+        <button onclick="window.print()" class="btn btn-outline-secondary fw-bold shadow-sm">
+            <i class="fa fa-print me-1"></i> Stampa / PDF
+        </button>
     </div>
 </div>
 

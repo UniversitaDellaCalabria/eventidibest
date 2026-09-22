@@ -17,13 +17,16 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 - **Prenotazioni con turni**: apertura/chiusura automatica, lista d'attesa, multi-posto, approvazione manuale
 - **Autenticazione SSO** via SimpleSAMLphp (integrazione SSO Unical) + accesso esterno (CIE/SPID)
 - **RBAC** a 3 livelli: Super Admin, Gestore Area/Evento, Utente
-- **Check-in** tramite QR code (scanner da browser, self check-in studente)
+- **Check-in** tramite QR code (scanner da browser, self check-in studente) con email attestato automatica post-check-in
 - **Attestati** PDF generati automaticamente al completamento dell'evento
 - **Sondaggi/questionari** collegabili agli eventi con export XLS
-- **Dashboard amministrativa** con KPI, grafici (Chart.js), messaggi non letti
+- **Dashboard amministrativa** con KPI, grafici (Chart.js), messaggi non letti, export CSV/Excel e stampa PDF
 - **Profilo utente**: pagina dedicata con dati SSO e modifica email personale
 - **Form builder** per campi prenotazione personalizzati per area/evento
 - **Email automatiche**: conferma, cancellazione, promemoria (via SMTP configurabile)
+- **Badge posti disponibili** in tempo reale sulle card eventi (liberi / lista d'attesa / esauriti / concluso)
+- **Stampa lista iscritti** in vista ottimizzata per stampa/PDF con filtri attivi
+- **Ricerca testuale** iscritti per nome, cognome, email, codice prenotazione
 - **Audit log** di tutte le operazioni amministrative
 - **Rate limiting** anti-flood sugli endpoint pubblici
 - **PWA-ready** (manifest + service worker + offline fallback)
@@ -127,10 +130,12 @@ eventidibest-cms/
 │   ├── admin_header.php    # Autenticazione, RBAC, sidebar
 │   ├── dashboard.php       # Dashboard con KPI e grafici
 │   ├── eventi.php          # CRUD eventi e turni
-│   ├── iscritti.php        # Gestione prenotazioni
-│   ├── messaggi.php        # Sistema messaggistica admin<->utente
-│   ├── sondaggi.php        # Questionari e feedback
-│   ├── audit_log.php       # Log attivita sistema
+│   ├── iscritti.php            # Gestione prenotazioni (ricerca, presenza, attestati)
+│   ├── stampa_lista_iscritti.php # Vista stampabile/PDF lista iscritti
+│   ├── messaggi.php            # Sistema messaggistica admin<->utente
+│   ├── sondaggi.php            # Questionari e feedback
+│   ├── statistiche.php         # KPI, grafici, export CSV/Excel, stampa PDF
+│   ├── audit_log.php           # Log attivita sistema
 │   └── ...
 ├── database/
 │   └── schema.sql          # Schema completo del database (18 tabelle)

@@ -79,13 +79,10 @@ if (isset($_POST['del_user'])) {
 // ==============================================================================
 
 // Recupero Ruoli
-$ruoli = []; $ruoli_map = [];
-$res_ru = $conn->query("SELECT * FROM ruoli ORDER BY id ASC"); 
-if ($res_ru) { 
-    while($r = $res_ru->fetch_assoc()) { 
-        $ruoli[] = $r; 
-        $ruoli_map[(int)$r['id']] = $r['nome']; 
-    } 
+$ruoli = get_ruoli($conn);
+$ruoli_map = [];
+foreach ($ruoli as $r) {
+    $ruoli_map[(int)$r['id']] = $r['nome'];
 }
 
 // Recupero Utenti Completo

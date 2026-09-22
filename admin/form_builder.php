@@ -20,6 +20,7 @@ function admin_redirect($url) {
 
 // 1. AGGIUNGI NUOVO CAMPO CUSTOM
 if (isset($_POST['add_campo_custom'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
     $p_id = (int)($_POST['p_id'] ?? $_POST['pagina_id'] ?? $filtro_p);
     if ($p_id <= 0) { $p_id = $filtro_p; }
     
@@ -47,6 +48,7 @@ if (isset($_POST['add_campo_custom'])) {
 
 // 2. MODIFICA CAMPO ESISTENTE
 if (isset($_POST['edit_campo_custom'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
     $cf_id = (int)$_POST['campo_id'];
     $p_id = (int)($_POST['p_id'] ?? $filtro_p);
     
@@ -104,6 +106,7 @@ if ($res_cf) {
 <div class="card shadow-sm border-0 p-4 mb-4">
     <h5 class="fw-bold text-danger border-bottom pb-2 mb-3"><i class="fa fa-plus-circle me-1"></i> Aggiungi Campo Personalizzato al Form di Registrazione</h5>
     <form method="POST" class="row g-3">
+        <?php csrf_field(); ?>
         <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
         <input type="hidden" name="pagina_id" value="<?php echo $filtro_p; ?>">
         
@@ -207,6 +210,7 @@ if ($res_cf) {
                                 <div class="modal-dialog modal-lg">
                                     <div class="modal-content">
                                         <form method="POST">
+                                            <?php csrf_field(); ?>
                                             <input type="hidden" name="campo_id" value="<?php echo $cf['id']; ?>">
                                             <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
                                             

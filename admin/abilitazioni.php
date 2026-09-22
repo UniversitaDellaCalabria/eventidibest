@@ -34,6 +34,7 @@ if ($filtro_p == 0) {
 // ==============================================================================
 
 if (isset($_POST['assegna_permessi'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
     $u_id = (int)$_POST['utente_id'];
     $permessi = $_POST['permessi'] ?? [];
     $ambito = $_POST['ambito_eventi'] ?? 'tutti'; // 'tutti' o 'specifici'
@@ -100,6 +101,7 @@ if (isset($_POST['assegna_permessi'])) {
 
 // RIMOZIONE TOTALE UTENTE DALL'AREA
 if (isset($_POST['remove_user_all'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
     $u_id = (int)$_POST['utente_id'];
     
     // Pulisce l'Area
@@ -221,7 +223,7 @@ if ($res_e_scan) {
     </div>
     <div class="card-body bg-light">
         <form method="POST" class="bg-white p-4 rounded border border-primary shadow-sm">
-            
+            <?php csrf_field(); ?>
             <div class="row g-4 mb-4">
                 <!-- 1. SELEZIONE UTENTE E PERMESSI -->
                 <div class="col-md-6 border-end">
@@ -339,6 +341,7 @@ if ($res_e_scan) {
                                 </td>
                                 <td class="text-end px-4">
                                     <form method="POST" class="m-0">
+                                        <?php csrf_field(); ?>
                                         <input type="hidden" name="utente_id" value="<?php echo $u_id; ?>">
                                         <button type="submit" name="remove_user_all" class="btn btn-outline-danger btn-sm fw-bold" data-confirm="Sei sicuro? Questa azione rimuoverà l\'utente sia dalla gestione dell\'Area che da tutti i singoli eventi a lui assegnati in quest\'area."><i class="fa fa-trash-alt me-1"></i> Revoca Tutto</button>
                                     </form>

@@ -21,37 +21,33 @@ $esito_classe = "";
 
 // SE È STATO SCANSIONATO UN CODICE, ELABORA IL CHECK-IN
 if (!empty($code)) {
-    // Aggiunti i campi gestori per la verifica dei permessi
-    $stmt = $conn->prepare("
-        SELECT pr.id, pr.stato, pr.presente, pr.nome, pr.cognome, 
-               e.titolo as evento_titolo, e.gestori_utenti_ids as ev_gestori,
-               pe.gestore_utente_id as pg_gestore_singolo, pe.gestori_utenti_ids as pg_gestori
-        FROM prenotazioni pr 
-        JOIN turni t ON pr.turno_id = t.id 
-        JOIN eventi e ON t.evento_id = e.id 
-        LEFT JOIN pagine_eventi pe ON e.pagina_id = pe.id
-        WHERE pr.codice_prenotazione = ? LIMIT 1
-    ");
-    $stmt->bind_param("s", $code);
-    $stmt->execute();
-    $res = $stmt->get_result();
+    $p = get_prenotazione_per_checkin_admin($conn, $code);
 
-    if ($res && $res->num_rows > 0) {
-        $p = $res->fetch_assoc();
+    if ($p !== null) {
         
         // ==========================================
         // VERIFICA "PARAOCCHI" (RBAC) SULL'EVENTO
         // ==========================================
         $is_authorized = $is_full_admin;
         if (!$is_authorized) {
+            // Controlla vecchio campo CSV
             $allowed_ids = array_filter(explode(',', $p['ev_gestori'] ?? ''));
             $pg_ids = array_filter(explode(',', $p['pg_gestori'] ?? ''));
             if ($p['pg_gestore_singolo']) $pg_ids[] = $p['pg_gestore_singolo'];
-            
-            $all_allowed = array_merge($allowed_ids, $pg_ids);
-            
-            if (in_array((string)$u_id, $all_allowed)) {
+            if (in_array((string)$u_id, array_merge($allowed_ids, $pg_ids))) {
                 $is_authorized = true;
+            }
+            // Controlla nuovo campo permessi_gestori_json (sistema abilitazioni)
+            if (!$is_authorized) {
+                $ev_json = json_decode($p['ev_permessi_json'] ?? '{}', true) ?: [];
+                $pg_json = json_decode($p['pg_permessi_json'] ?? '{}', true) ?: [];
+                $uid_str = (string)$u_id;
+                if (
+                    (isset($ev_json[$uid_str]) && in_array('iscritti', $ev_json[$uid_str])) ||
+                    (isset($pg_json[$uid_str]) && in_array('iscritti', $pg_json[$uid_str]))
+                ) {
+                    $is_authorized = true;
+                }
             }
         }
 
@@ -67,6 +63,7 @@ if (!empty($code)) {
         } else {
             // Aggiorna come presente
             $conn->query("UPDATE prenotazioni SET presente = 1, data_presenza = NOW() WHERE id = " . $p['id']);
+            invia_email_attestato_se_concluso($conn, $p['id']);
             $esito_classe = "alert-success";
             $msg_esito = "✅ <strong>INGRESSO CONSENTITO</strong><br>Utente: <strong>{$p['nome']} {$p['cognome']}</strong><br>Evento: {$p['evento_titolo']}";
         }

@@ -436,6 +436,11 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link w-100 <?php echo ($current_page == 'log_accessi.php') ? 'active' : ''; ?>" href="log_accessi.php?p_id=<?php echo $filtro_p; ?>">
+                            <i class="fa fa-sign-in-alt me-2 text-center" style="width:20px;"></i> Log Accessi SSO
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link w-100 <?php echo ($current_page == 'sistema.php') ? 'active' : ''; ?>" href="sistema.php?p_id=<?php echo $filtro_p; ?>">
                             <i class="fa fa-envelope me-2 text-center" style="width:20px;"></i> Sistema Email
                         </a>

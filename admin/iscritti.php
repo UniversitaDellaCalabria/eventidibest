@@ -34,15 +34,7 @@ if (isset($_POST['ajax_action'])) {
         $oggetto = trim($_POST['oggetto'] ?? '');
         $messaggio = trim($_POST['messaggio'] ?? '');
 
-        $cond_turno_ajax = $turno_id_ajax > 0 ? " AND t.id = $turno_id_ajax" : "";
-        $sql_rec = "SELECT pr.email, pr.nome, pr.cognome FROM prenotazioni pr 
-                    JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id 
-                    WHERE e.pagina_id = $p_id_ajax AND IFNULL(pr.stato, 'confermata') = 'confermata' 
-                    $cond_turno_ajax AND pr.email != ''";
-        
-        $res_rec = $conn->query($sql_rec);
-        $destinatari = [];
-        if ($res_rec) { while($row = $res_rec->fetch_assoc()) { $destinatari[] = $row; } }
+        $destinatari = get_destinatari_email_massiva($conn, $p_id_ajax, $turno_id_ajax);
 
         $_SESSION['mass_mail_queue'] = [
             'destinatari' => $destinatari, 'totale' => count($destinatari), 'inviate' => 0, 'oggetto' => $oggetto, 'messaggio' => $messaggio
@@ -96,7 +88,12 @@ function admin_redirect($url) { echo "<script>window.location.replace('$url');</
 $filtro_turno = isset($_GET['f_turno']) ? (int)$_GET['f_turno'] : 0;
 $_stati_consentiti = ['confermata', 'in_attesa', 'da_approvare', 'annullata', 'rifiutata', 'scaduta'];
 $filtro_stato = (isset($_GET['f_stato']) && in_array($_GET['f_stato'], $_stati_consentiti, true)) ? $_GET['f_stato'] : '';
+$filtro_cerca = trim($_GET['f_cerca'] ?? '');
+$filtro_data_da   = (isset($_GET['f_data_da'])   && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['f_data_da']))   ? $_GET['f_data_da']   : '';
+$filtro_data_fine = (isset($_GET['f_data_fine']) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $_GET['f_data_fine'])) ? $_GET['f_data_fine'] : '';
 $url_suffix = $is_archivio ? "&archivio=1" : "";
+$url_suffix .= !empty($filtro_data_da)   ? "&f_data_da="   . urlencode($filtro_data_da)   : "";
+$url_suffix .= !empty($filtro_data_fine) ? "&f_data_fine=" . urlencode($filtro_data_fine) : "";
 
 // ==============================================================================
 // BLOCCO AZIONI BACKEND (Eseguite solo se NON archiviato)
@@ -106,6 +103,7 @@ if (!$is_archivio) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['toggle_presenza']; $val = (int)$_POST['val'];
         $conn->query("UPDATE prenotazioni SET presente = $val WHERE id = $pr_id");
+        if ($val === 1) invia_email_attestato_se_concluso($conn, $pr_id);
         if (function_exists('registra_log_audit')) registra_log_audit($conn, "Modifica Presenza Check-in", ["ID Prenotazione" => $pr_id]);
         admin_redirect("iscritti.php?p_id=$filtro_p&f_turno=$filtro_turno&f_stato=$filtro_stato$url_suffix");
     }
@@ -113,8 +111,8 @@ if (!$is_archivio) {
     if (isset($_POST['approva_pren'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['approva_pren'];
-        $res_p_info = $conn->query("SELECT pr.*, t.id as turno_id, t.data_turno, t.orario_inizio, t.orario_fine, e.titolo as evento_titolo, e.luogo FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE pr.id = $pr_id LIMIT 1");
-        if ($res_p_info && $p_data = $res_p_info->fetch_assoc()) {
+        $p_data = get_prenotazione_con_turno_evento($conn, $pr_id);
+        if ($p_data) {
             $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = $pr_id");
             $data_formatted = date('d/m/Y', strtotime($p_data['data_turno']));
             $ora_formatted = substr($p_data['orario_inizio'], 0, 5) . ' - ' . substr($p_data['orario_fine'], 0, 5);
@@ -135,8 +133,8 @@ if (!$is_archivio) {
     if (isset($_POST['rifiuta_pren'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['rifiuta_pren'];
-        $stmt_chk = $conn->query("SELECT pr.email, e.titolo as evento_titolo FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE pr.id = $pr_id LIMIT 1");
-        if ($stmt_chk && $p_data = $stmt_chk->fetch_assoc()) {
+        $p_data = get_prenotazione_con_turno_evento($conn, $pr_id);
+        if ($p_data) {
             $conn->query("UPDATE prenotazioni SET stato = 'rifiutata' WHERE id = $pr_id");
             $oggetto = "Aggiornamento Prenotazione: " . $p_data['evento_titolo'];
             $corpo = "<p>Siamo spiacenti di informarti che la tua richiesta per l'evento <strong>{$p_data['evento_titolo']}</strong> non è stata accolta.</p>";
@@ -149,8 +147,8 @@ if (!$is_archivio) {
     if (isset($_POST['annulla_pren'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['annulla_pren'];
-        $stmt_chk = $conn->query("SELECT pr.*, t.id as turno_id, e.titolo as evento_titolo FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE pr.id = $pr_id LIMIT 1");
-        if ($stmt_chk && $p_data = $stmt_chk->fetch_assoc()) {
+        $p_data = get_prenotazione_con_turno_evento($conn, $pr_id);
+        if ($p_data) {
             $upd_ok = $conn->query("UPDATE prenotazioni SET stato = 'annullata' WHERE id = $pr_id");
             if ($upd_ok && $conn->affected_rows > 0) {
                 if (!empty($p_data['email'])) { inviaNotificaEmail($p_data['email'], "Prenotazione Annullata: " . $p_data['evento_titolo'], "La tua prenotazione è stata annullata dall'amministrazione.", $conn); }
@@ -171,9 +169,8 @@ if (!$is_archivio) {
     if (isset($_POST['del_pren'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_del_id = (int)$_POST['del_pren'];
-        $stmt_chk = $conn->query("SELECT pr.*, t.id as turno_id, e.titolo as evento_titolo FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE pr.id = $pr_del_id");
-        if ($stmt_chk && $stmt_chk->num_rows > 0) {
-            $p_data = $stmt_chk->fetch_assoc();
+        $p_data = get_prenotazione_con_turno_evento($conn, $pr_del_id);
+        if ($p_data) {
             $conn->query("DELETE FROM prenotazioni WHERE id = $pr_del_id");
             if (!empty($p_data['email'])) { inviaNotificaEmail($p_data['email'], "Cancellazione Prenotazione", "La tua prenotazione per <strong>{$p_data['evento_titolo']}</strong> è stata cancellata.", $conn); }
             if ($p_data['stato'] === 'confermata' || $p_data['stato'] === 'richiesta_conferma') { promuovi_lista_attesa($conn, $p_data['turno_id']); }
@@ -194,7 +191,34 @@ if (!$is_archivio) {
             $stmt_msg = $conn->prepare("INSERT INTO messaggi_prenotazioni (prenotazione_id, mittente_tipo, mittente_id, messaggio) VALUES (?, 'admin', ?, ?)");
             $stmt_msg->bind_param("iis", $pr_id, $admin_id, $messaggio_html);
             $stmt_msg->execute();
-            if (!empty($email_dest)) { inviaNotificaEmail($email_dest, "Nuovo messaggio - Evento: " . $ev_titolo, $messaggio_html, $conn); }
+            if (!empty($email_dest)) {
+                $nome_operatore = 'Segreteria DiBEST';
+                $stmt_op = $conn->prepare("SELECT nome, cognome FROM utenti WHERE id = ? LIMIT 1");
+                $stmt_op->bind_param("i", $admin_id);
+                $stmt_op->execute();
+                $res_op = $stmt_op->get_result();
+                if ($res_op && $op = $res_op->fetch_assoc()) {
+                    $nome_operatore = trim($op['nome'] . ' ' . $op['cognome']);
+                }
+                $url_area  = "https://dibest2.unical.it/eventi/area_personale.php";
+                $oggetto   = "Nuovo messaggio da " . $nome_operatore . " – " . $ev_titolo . " [" . date('d/m H:i') . "]";
+                $body_mail = "
+                    <p>Hai ricevuto un nuovo messaggio da <strong>" . htmlspecialchars($nome_operatore) . "</strong>
+                    riguardante l'evento <strong>" . htmlspecialchars($ev_titolo) . "</strong>:</p>
+                    <div style='background:#f8fafc; padding:15px; border-left:4px solid #B80000; margin:15px 0; font-style:italic;'>
+                        $messaggio_html
+                    </div>
+                    <p>Accedi alla tua Area Personale per leggere il messaggio completo e rispondere:</p>
+                    <p>
+                        <a href='$url_area' style='background-color:#B80000; color:#ffffff; padding:12px 25px;
+                           text-decoration:none; border-radius:6px; display:inline-block;
+                           font-weight:bold; font-family:sans-serif;'>
+                            Vai all'Area Personale per rispondere
+                        </a>
+                    </p>
+                    <p style='color:#6c757d; font-size:0.9em;'>Cordiali saluti,<br>" . htmlspecialchars($nome_operatore) . "<br>Segreteria DiBEST</p>";
+                inviaNotificaEmail($email_dest, $oggetto, $body_mail, $conn);
+            }
             flash_set("✅ Messaggio inviato.");
         }
         admin_redirect("iscritti.php?p_id=$filtro_p&f_turno=$filtro_turno&f_stato=$filtro_stato$url_suffix");
@@ -209,8 +233,8 @@ if (!$is_archivio) {
         $matricola = trim($_POST['matricola'] ?? '');
         $num_posti = isset($_POST['num_posti']) ? max(1, (int)$_POST['num_posti']) : 1;
 
-        $res_t = $conn->query("SELECT t.*, e.titolo as evento_titolo, pe.slug FROM turni t JOIN eventi e ON t.evento_id = e.id LEFT JOIN pagine_eventi pe ON e.pagina_id = pe.id WHERE t.id = $turno_id LIMIT 1");
-        if ($res_t && $t_info = $res_t->fetch_assoc()) {
+        $t_info = get_turno_admin($conn, $turno_id);
+        if ($t_info) {
             $codice_p = strtoupper(substr($t_info['slug'] ?: 'EV', 0, 2)) . '-' . strtoupper(substr(md5(uniqid(rand(), true)), 0, 8));
             $stmt_man = $conn->prepare("INSERT INTO prenotazioni (turno_id, codice_prenotazione, stato, num_posti, nome, cognome, email, matricola) VALUES (?, ?, 'confermata', ?, ?, ?, ?, ?)");
             $stmt_man->bind_param("isisss" . "s", $turno_id, $codice_p, $num_posti, $nome, $cognome, $email, $matricola);
@@ -260,9 +284,7 @@ if (isset($_POST['export_xls']) || isset($_POST['export_csv'])) {
     $cond_turno_exp = $f_turno_exp > 0 ? " AND t.id = $f_turno_exp" : "";
     $cond_stato_exp = !empty($f_stato_exp) ? " AND IFNULL(pr.stato, 'confermata') = '$f_stato_exp'" : "";
     
-    $custom_cols = [];
-    $res_cf = $conn->query("SELECT DISTINCT nome_campo, etichetta FROM campi_form WHERE pagina_id = $p_export OR evento_id IN (SELECT id FROM eventi WHERE pagina_id = $p_export) ORDER BY id ASC");
-    if ($res_cf) while ($cf = $res_cf->fetch_assoc()) $custom_cols[$cf['nome_campo']] = $cf['etichetta'];
+    $custom_cols = get_campi_custom_export($conn, $p_export);
 
     $sql_export = "SELECT pr.codice_prenotazione, pr.presente, IFNULL(pr.stato, 'confermata') as stato, COALESCE(pr.num_posti, 1) as num_posti, pr.nome, pr.cognome, COALESCE(NULLIF(pr.matricola, ''), u.matricola_studente, u.matricola_dipendente, u.matricola, '') as matricola_effettiva, pr.email, e.titolo as evento, t.data_turno, t.orario_inizio, pr.dati_custom_json, pr.data_prenotazione 
                 FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id LEFT JOIN utenti u ON pr.utente_id = u.id
@@ -316,25 +338,27 @@ if (isset($_POST['export_xls']) || isset($_POST['export_csv'])) {
 // PREPARAZIONE DATI FRONT-END
 // ==============================================================================
 
-$tutti_gli_eventi = [];
-// LOGICA DINAMICA: Peschiamo solo attivi (o solo archiviati se in modalità archivio)
-$res_ev = $conn->query("SELECT id, titolo FROM eventi e WHERE e.pagina_id = $filtro_p AND e.archiviato = $is_archivio $sql_filtro_eventi_rbac ORDER BY e.ordine ASC, e.id DESC");
-if ($res_ev) {
-    while($row = $res_ev->fetch_assoc()) {
-        $turni = [];
-        $res_t = $conn->query("SELECT * FROM turni WHERE evento_id = {$row['id']} ORDER BY data_turno ASC, orario_inizio ASC");
-        if($res_t) { while($t = $res_t->fetch_assoc()) $turni[] = $t; }
-        $row['turni'] = $turni;
-        $tutti_gli_eventi[] = $row;
-    }
-}
+$tutti_gli_eventi = get_eventi_con_turni_admin($conn, $filtro_p, $is_archivio, $sql_filtro_eventi_rbac);
 
 $prenotazioni = [];
 $per_page = 50;
 $page = max(1, (int)($_GET['page'] ?? 1));
 $cond_turno_pr = $filtro_turno > 0 ? " AND t.id = $filtro_turno" : "";
 $cond_stato_pr = !empty($filtro_stato) ? " AND IFNULL(pr.stato, 'confermata') = '$filtro_stato'" : "";
-$where_pr = "WHERE e.pagina_id = $filtro_p AND e.archiviato = $is_archivio $cond_turno_pr $cond_stato_pr $sql_filtro_eventi_rbac";
+$cond_cerca_pr = '';
+if (!empty($filtro_cerca)) {
+    $cerca_esc = $conn->real_escape_string($filtro_cerca);
+    $cond_cerca_pr = " AND (pr.nome LIKE '%$cerca_esc%' OR pr.cognome LIKE '%$cerca_esc%' OR pr.email LIKE '%$cerca_esc%' OR pr.codice_prenotazione LIKE '%$cerca_esc%')";
+}
+$cond_data_pr = '';
+if (!empty($filtro_data_da) && !empty($filtro_data_fine)) {
+    $cond_data_pr = " AND t.data_turno BETWEEN '$filtro_data_da' AND '$filtro_data_fine'";
+} elseif (!empty($filtro_data_da)) {
+    $cond_data_pr = " AND t.data_turno >= '$filtro_data_da'";
+} elseif (!empty($filtro_data_fine)) {
+    $cond_data_pr = " AND t.data_turno <= '$filtro_data_fine'";
+}
+$where_pr = "WHERE e.pagina_id = $filtro_p AND e.archiviato = $is_archivio $cond_turno_pr $cond_stato_pr $cond_cerca_pr $cond_data_pr $sql_filtro_eventi_rbac";
 $res_count = $conn->query("SELECT COUNT(*) as tot FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id LEFT JOIN utenti u ON pr.utente_id = u.id $where_pr");
 $total_count = ($res_count && $r_cnt = $res_count->fetch_assoc()) ? (int)$r_cnt['tot'] : 0;
 $total_pages = max(1, (int)ceil($total_count / $per_page));
@@ -348,16 +372,7 @@ $res_pr = $conn->query($sql_pr);
 if($res_pr) while($r = $res_pr->fetch_assoc()) $prenotazioni[] = $r;
 
 $pr_ids = array_column($prenotazioni, 'id');
-$messaggi_per_pr = [];
-if (!empty($pr_ids)) {
-    $ids_str = implode(',', $pr_ids);
-    $res_msg = $conn->query("SELECT * FROM messaggi_prenotazioni WHERE prenotazione_id IN ($ids_str) ORDER BY data_invio ASC");
-    if ($res_msg) {
-        while($m = $res_msg->fetch_assoc()) {
-            $messaggi_per_pr[$m['prenotazione_id']][] = $m;
-        }
-    }
-}
+$messaggi_per_pr = get_messaggi_per_prenotazioni($conn, $pr_ids);
 ?>
 
 <!-- FRONT-END DELLA PAGINA -->
@@ -377,7 +392,7 @@ if (!empty($pr_ids)) {
 <div class="card shadow-sm border-0">
     <div class="card-header bg-white py-3 d-flex flex-column gap-3">
         
-        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
             <span class="fw-bold text-primary fs-5">
                 Iscritti <?php echo $is_archivio ? 'Archiviati ' : ''; ?>alla Pagina: <?php echo htmlspecialchars($page_cfg['titolo'] ?? ''); ?>
             </span>
@@ -386,6 +401,11 @@ if (!empty($pr_ids)) {
                     <a href="../checkin.php" target="_blank" class="btn btn-outline-dark btn-sm fw-bold shadow-sm">
                         <i class="fa fa-qrcode me-1"></i> Apri Scanner QR
                     </a>
+                <?php endif; ?>
+                <a href="stampa_lista_iscritti.php?p_id=<?php echo $filtro_p; ?>&f_turno=<?php echo $filtro_turno; ?>&f_stato=<?php echo urlencode($filtro_stato); ?>&f_cerca=<?php echo urlencode($filtro_cerca); ?>&f_data_da=<?php echo urlencode($filtro_data_da); ?>&f_data_fine=<?php echo urlencode($filtro_data_fine); ?><?php echo $is_archivio ? '&archivio=1' : ''; ?>" target="_blank" class="btn btn-outline-secondary btn-sm fw-bold shadow-sm">
+                    <i class="fa fa-print me-1"></i> Stampa Lista
+                </a>
+                <?php if (!$is_archivio): ?>
                     <a href="../cron_attestati.php" class="btn btn-success btn-sm fw-bold text-white shadow-sm" data-confirm="Vuoi scansionare tutti gli eventi terminati e inviare le email agli studenti presenti?">
                         <i class="fa fa-graduation-cap me-1"></i> Invia Attestati Ora
                     </a>
@@ -425,6 +445,25 @@ if (!empty($pr_ids)) {
                     <option value="annullata" <?php echo $filtro_stato === 'annullata' ? 'selected' : ''; ?>>🚫 Annullata</option>
                     <option value="rifiutata" <?php echo $filtro_stato === 'rifiutata' ? 'selected' : ''; ?>>❌ Rifiutata</option>
                 </select>
+
+                <div class="d-flex align-items-center gap-1">
+                    <i class="fa fa-calendar-alt text-secondary" title="Range date turno"></i>
+                    <input type="date" name="f_data_da" class="form-control form-control-sm" style="max-width:140px;" value="<?php echo htmlspecialchars($filtro_data_da); ?>" title="Data turno dal">
+                    <span class="text-muted small">—</span>
+                    <input type="date" name="f_data_fine" class="form-control form-control-sm" style="max-width:140px;" value="<?php echo htmlspecialchars($filtro_data_fine); ?>" title="Data turno al">
+                    <button type="submit" class="btn btn-outline-primary btn-sm" title="Applica filtro date"><i class="fa fa-calendar-check"></i></button>
+                    <?php if (!empty($filtro_data_da) || !empty($filtro_data_fine)): ?>
+                        <a href="iscritti.php?p_id=<?php echo $filtro_p; ?>&f_turno=<?php echo $filtro_turno; ?>&f_stato=<?php echo urlencode($filtro_stato); ?>&f_cerca=<?php echo urlencode($filtro_cerca); ?><?php echo $is_archivio ? '&archivio=1' : ''; ?>" class="btn btn-outline-danger btn-sm" title="Cancella filtro date"><i class="fa fa-times"></i></a>
+                    <?php endif; ?>
+                </div>
+
+                <div class="input-group input-group-sm" style="max-width: 240px;">
+                    <input type="text" name="f_cerca" class="form-control form-control-sm" placeholder="Nome, email, codice..." value="<?php echo htmlspecialchars($filtro_cerca); ?>">
+                    <button type="submit" class="btn btn-outline-secondary btn-sm"><i class="fa fa-search"></i></button>
+                    <?php if (!empty($filtro_cerca)): ?>
+                        <a href="iscritti.php?p_id=<?php echo $filtro_p; ?>&f_turno=<?php echo $filtro_turno; ?>&f_stato=<?php echo urlencode($filtro_stato); ?><?php echo $url_suffix; ?>" class="btn btn-outline-danger btn-sm" title="Cancella ricerca"><i class="fa fa-times"></i></a>
+                    <?php endif; ?>
+                </div>
             </form>
 
             <div class="d-flex gap-2">
@@ -440,6 +479,8 @@ if (!empty($pr_ids)) {
                     <?php if ($is_archivio): ?><input type="hidden" name="archivio" value="1"><?php endif; ?>
                     <input type="hidden" name="f_turno_export" value="<?php echo $filtro_turno; ?>">
                     <input type="hidden" name="f_stato_export" value="<?php echo htmlspecialchars($filtro_stato); ?>">
+                    <input type="hidden" name="f_data_da_export" value="<?php echo htmlspecialchars($filtro_data_da); ?>">
+                    <input type="hidden" name="f_data_fine_export" value="<?php echo htmlspecialchars($filtro_data_fine); ?>">
                     <button type="submit" name="export_xls" class="btn btn-success btn-sm fw-bold shadow-sm" title="Esporta solo la selezione attuale"><i class="fa fa-file-excel me-1"></i> Excel</button>
                     <button type="submit" name="export_csv" class="btn btn-secondary btn-sm fw-bold shadow-sm" title="Esporta solo la selezione attuale"><i class="fa fa-file-csv me-1"></i> CSV</button>
                 </form>

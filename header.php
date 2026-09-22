@@ -231,6 +231,11 @@ if ($u_logged_header) {
         if (isHighContrast) document.body.classList.add('high-contrast');
         if (zoomLevel) document.documentElement.style.fontSize = zoomLevel + '%';
     })();
+    // Listener a livello top-level: pageshow bfcache funziona anche se DOMContentLoaded
+    // non ri-scatta quando la pagina viene ripristinata dalla cache del browser.
+    window.addEventListener('pageshow', function(e) {
+        if (e.persisted) window.location.reload();
+    });
 </script>
 
 <div class="top-bar-istituzionale d-none d-lg-block">
@@ -259,7 +264,6 @@ if ($u_logged_header) {
                         <div class="dropdown-menu dropdown-menu-end agid-dropdown" aria-labelledby="userTopDropdown">
                             <ul class="list-unstyled m-0 p-0">
                                 <li><a class="list-item" href="area_personale.php"><i class="fa fa-id-card text-primary me-2" aria-hidden="true"></i> Area Personale</a></li>
-                                <li><a class="list-item" href="area_personale.php#profilo"><i class="fa fa-user-edit text-secondary me-2" aria-hidden="true"></i> Il mio profilo</a></li>
                                 <?php if ($is_admin_header): ?>
                                     <li><a class="list-item" href="admin/index.php"><i class="fa fa-cogs text-danger me-2" aria-hidden="true"></i> Pannello Gestori</a></li>
                                     <li><a class="list-item" href="checkin.php" target="_blank"><i class="fa fa-qrcode text-success me-2" aria-hidden="true"></i> Scanner Check-in</a></li>
@@ -383,7 +387,6 @@ if ($u_logged_header) {
         <?php if ($u_logged_header): ?>
             <div class="mob-nav-user"><i class="fa fa-user-circle me-2" aria-hidden="true"></i><?php echo htmlspecialchars($nome_visualizzato); ?></div>
             <a href="area_personale.php" class="mob-nav-link"><i class="fa fa-id-card me-2" style="color:#60a5fa;" aria-hidden="true"></i> Area Personale</a>
-            <a href="area_personale.php#profilo" class="mob-nav-link"><i class="fa fa-user-edit me-2" style="color:#94a3b8;" aria-hidden="true"></i> Il mio profilo</a>
             <?php if ($is_admin_header): ?>
                 <a href="admin/index.php" class="mob-nav-link"><i class="fa fa-cogs me-2" style="color:#f59e0b;" aria-hidden="true"></i> Pannello Gestori</a>
                 <a href="checkin.php" target="_blank" class="mob-nav-link"><i class="fa fa-qrcode me-2" style="color:#34d399;" aria-hidden="true"></i> Scanner Check-in</a>
@@ -537,5 +540,6 @@ document.addEventListener("DOMContentLoaded", function() {
     document.getElementById('mobileNavClose')?.addEventListener('click', closeMobileNav);
     mobileOverlay?.addEventListener('click', closeMobileNav);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMobileNav(); });
+
 });
 </script>

@@ -93,9 +93,7 @@ if (isset($_POST['del_menu'])) {
 // ==============================================================================
 
 // Recupero Ruoli per i filtri di visibilità
-$ruoli = []; 
-$res_ru = $conn->query("SELECT * FROM ruoli ORDER BY id ASC"); 
-if ($res_ru) { while($r = $res_ru->fetch_assoc()) { $ruoli[] = $r; } }
+$ruoli = get_ruoli($conn);
 
 // Lista Pagine/Aree di Lavoro (Per Autocompletamento URL)
 $aree_lavoro = [];
