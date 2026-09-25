@@ -27,13 +27,14 @@ $is_owner = ($u_id > 0 && ($p['utente_id'] == $u_id || strtolower($p['email']) =
 
 if (!$is_admin_or_gestore && !$is_owner) { die("Accesso negato. Non sei autorizzato a visualizzare questo attestato."); }
 
-// CALCOLO ORE
-$inizio_ts = strtotime($p['orario_inizio']);
-$fine_ts = strtotime($p['orario_fine']);
-$ore_totali = round(($fine_ts - $inizio_ts) / 3600, 1);
-$ore_testo = str_replace('.0', '', (string)$ore_totali);
+// CALCOLO ORE (solo se il turno ha entrambi gli orari)
+$ore_testo = '';
+if (!empty($p['orario_inizio']) && !empty($p['orario_fine'])) {
+    $ore_totali = round((strtotime($p['orario_fine']) - strtotime($p['orario_inizio'])) / 3600, 1);
+    $ore_testo = str_replace('.0', '', (string)$ore_totali);
+}
 
-$data_evento = date('d/m/Y', strtotime($p['data_turno']));
+$data_evento = !empty($p['data_turno']) ? date('d/m/Y', strtotime($p['data_turno'])) : '';
 
 // Usa il nuovo logo dell'Area se esiste, altrimenti usa quello standard globale
 $logo_src = !empty($p['logo_attestato_path']) ? htmlspecialchars($p['logo_attestato_path']) : (!empty($p['logo_path']) ? htmlspecialchars($p['logo_path']) : '');
@@ -169,8 +170,8 @@ $titolo_firma = !empty($p['firma_titolo']) ? $p['firma_titolo'] : 'Il Direttore 
                         <span class="mt-3 d-block">ha partecipato all'attività formativa/evento denominata:</span>
                         <span class="cert-event">"<?php echo htmlspecialchars($p['evento_titolo']); ?>"</span>
                         <span class="d-block mt-2">
-                            Svoltasi in data <strong><?php echo $data_evento; ?></strong> presso <?php echo htmlspecialchars($p['evento_luogo'] ?: 'le nostre strutture'); ?> 
-                            <strong>per un numero di ore pari a <?php echo $ore_testo; ?></strong>.
+                            Svoltasi<?php if ($data_evento !== ''): ?> in data <strong><?php echo $data_evento; ?></strong><?php endif; ?> presso <?php echo htmlspecialchars($p['evento_luogo'] ?: 'le nostre strutture'); ?><?php if ($ore_testo !== ''): ?>
+                            <strong>per un numero di ore pari a <?php echo $ore_testo; ?></strong><?php endif; ?>.
                         </span>
                     </div>
                 </div>

@@ -57,6 +57,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['esegui_installazione'
             `nome` varchar(100) DEFAULT NULL,
             `cognome` varchar(100) DEFAULT NULL,
             `email` varchar(150) DEFAULT NULL,
+            `email_personalizzata` tinyint(1) NOT NULL DEFAULT 0,
             `codice_fiscale` varchar(20) DEFAULT NULL,
             `matricola` varchar(50) DEFAULT NULL,
             `matricola_studente` varchar(50) DEFAULT NULL,
@@ -123,6 +124,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['esegui_installazione'
             `hero_banner_path` varchar(255) DEFAULT '',
             `sidebar_immagine_path` varchar(255) DEFAULT '',
             `ordine` int(11) DEFAULT 0,
+            `mostra_in_home` tinyint(1) NOT NULL DEFAULT 1,
+            `limite_iscrizioni` varchar(20) NOT NULL DEFAULT 'nessuno',
             PRIMARY KEY (`id`),
             UNIQUE KEY `slug` (`slug`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -155,9 +158,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['esegui_installazione'
         CREATE TABLE IF NOT EXISTS `turni` (
             `id` int(11) NOT NULL AUTO_INCREMENT,
             `evento_id` int(11) NOT NULL,
-            `data_turno` date NOT NULL,
-            `orario_inizio` time NOT NULL,
-            `orario_fine` time NOT NULL,
+            `nome_turno` varchar(150) DEFAULT NULL,
+            `data_turno` date DEFAULT NULL,
+            `orario_inizio` time DEFAULT NULL,
+            `orario_fine` time DEFAULT NULL,
             `max_posti` int(11) DEFAULT 30,
             `data_apertura` datetime DEFAULT NULL,
             `data_chiusura` datetime DEFAULT NULL,
@@ -217,7 +221,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['esegui_installazione'
         $conn->query("INSERT IGNORE INTO `ruoli` (`id`, `nome`) VALUES (1, 'Super Amministratore'), (2, 'Gestore Area/Evento'), (3, 'Studente'), (4, 'Docente/Dipendente'), (5, 'Ospite / Esterno')");
 
         // E. INSERIMENTO SUPER ADMIN
-        $stmt_admin = $conn->prepare("INSERT INTO utenti (ruolo_id, nome, cognome, email, codice_fiscale) VALUES (1, ?, ?, ?, ?)");
+        // email_personalizzata = 1: impedisce che il login SSO sovrascriva la email inserita qui
+        $stmt_admin = $conn->prepare("INSERT INTO utenti (ruolo_id, nome, cognome, email, codice_fiscale, email_personalizzata) VALUES (1, ?, ?, ?, ?, 1)");
         $stmt_admin->bind_param("ssss", $admin_nome, $admin_cognome, $admin_email, $admin_cf);
         $stmt_admin->execute();
 
@@ -304,7 +309,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['esegui_installazione'
                 </div>
 
                 <h5 class="fw-bold text-dark border-bottom pb-2 mb-3 mt-4"><i class="fa fa-user-shield me-2 text-danger"></i> 2. Profilo Super Amministratore</h5>
-                <p class="small text-muted mb-3">Inserisci i tuoi dati reali. Dato che l'accesso avviene tramite SSO Unical, assicurati che la tua Email o il Codice Fiscale corrispondano a quelli rilasciati dal Single Sign-On, altrimenti non verrai riconosciuto come Admin.</p>
+                <div class="alert alert-info small mb-3 py-2">
+                    <i class="fa fa-info-circle me-1"></i> L'accesso al portale avviene tramite <strong>SSO Unical</strong>. Il sistema ti riconoscerà come Admin confrontando il <strong>Codice Fiscale</strong> che inserisci qui con quello fornito dal Single Sign-On. <strong>Se lasci il CF vuoto non potrai mai accedere come Amministratore.</strong>
+                </div>
 
                 <div class="row g-3 mb-4">
                     <div class="col-md-6">
@@ -320,8 +327,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['esegui_installazione'
                         <input type="email" name="admin_email" class="form-control" placeholder="mario.rossi@unical.it" required>
                     </div>
                     <div class="col-md-6">
-                        <label class="form-label small fw-bold">Codice Fiscale (Opzionale)</label>
-                        <input type="text" name="admin_cf" class="form-control" placeholder="RSSMRA80A01H501Z">
+                        <label class="form-label small fw-bold">Codice Fiscale <span class="text-danger">*</span></label>
+                        <input type="text" name="admin_cf" class="form-control text-uppercase" placeholder="RSSMRA80A01H501Z" maxlength="16" required
+                               oninput="this.value=this.value.toUpperCase()">
+                        <div class="form-text text-danger fw-bold">Obbligatorio per il riconoscimento via SSO</div>
                     </div>
                 </div>
 

@@ -33,29 +33,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_messaggio_utent
         $stmt_msg->execute();
 
         // Notifica email ai gestori dell'evento
-        $res_ev_msg = $conn->query("SELECT pe.gestore_utente_id, pe.gestori_utenti_ids, pr.nome, pr.cognome, e.titolo as evento_titolo
+        $res_ev_msg = $conn->query("SELECT pr.nome, pr.cognome, e.id as evento_id, e.titolo as evento_titolo
                                     FROM prenotazioni pr
                                     JOIN turni t ON pr.turno_id = t.id
                                     JOIN eventi e ON t.evento_id = e.id
-                                    JOIN pagine_eventi pe ON e.pagina_id = pe.id
                                     WHERE pr.id = $pr_id LIMIT 1");
         if ($res_ev_msg && $ev_msg_data = $res_ev_msg->fetch_assoc()) {
-            $ids_gest_msg = array_filter(explode(',', $ev_msg_data['gestori_utenti_ids'] ?? ''));
-            if ((int)$ev_msg_data['gestore_utente_id'] > 0) { $ids_gest_msg[] = (int)$ev_msg_data['gestore_utente_id']; }
-            $ids_gest_msg = array_unique(array_map('intval', array_filter($ids_gest_msg)));
-            if (!empty($ids_gest_msg)) {
-                $in_ids_msg = implode(',', $ids_gest_msg);
-                $res_g_msg = $conn->query("SELECT email FROM utenti WHERE id IN ($in_ids_msg) AND email IS NOT NULL AND email != ''");
-                if ($res_g_msg) {
-                    $subj_g = "Nuovo messaggio assistenza – " . $ev_msg_data['evento_titolo'];
-                    $body_g = "<p>Gentile Gestore,</p>"
-                            . "<p><strong>" . htmlspecialchars($ev_msg_data['nome'] . ' ' . $ev_msg_data['cognome']) . "</strong> ha inviato un messaggio riguardante l'evento <strong>" . htmlspecialchars($ev_msg_data['evento_titolo']) . "</strong>.</p>"
-                            . "<p>Accedi al pannello di amministrazione &gt; Messaggi per rispondere.</p>"
-                            . "<p>Cordiali saluti,<br>Sistema EventiDiBEST</p>";
-                    while ($g_msg = $res_g_msg->fetch_assoc()) {
-                        if (!empty($g_msg['email'])) inviaNotificaEmail($g_msg['email'], $subj_g, $body_g, $conn);
-                    }
-                }
+            $subj_g = "Nuovo messaggio assistenza – " . $ev_msg_data['evento_titolo'];
+            $body_g = "<p>Gentile Gestore,</p>"
+                    . "<p><strong>" . htmlspecialchars($ev_msg_data['nome'] . ' ' . $ev_msg_data['cognome']) . "</strong> ha inviato un messaggio riguardante l'evento <strong>" . htmlspecialchars($ev_msg_data['evento_titolo']) . "</strong>.</p>"
+                    . "<p>Accedi al pannello di amministrazione &gt; Messaggi per rispondere.</p>"
+                    . "<p>Cordiali saluti,<br>Sistema EventiDiBEST</p>";
+            // I messaggi di assistenza vanno a tutti i gestori, indipendentemente dall'interruttore notifiche prenotazioni
+            foreach (get_email_gestori_evento($conn, (int)$ev_msg_data['evento_id'], false) as $em_gest) {
+                inviaNotificaEmail($em_gest, $subj_g, $body_g, $conn);
             }
         }
 
@@ -186,11 +177,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_prenotazione_ute
     // ================= FINE SEZIONE CRITICA =================
 
     if ($update_ok) {
+        if ($nuovo_stato === 'confermata') { decadi_attese_vincolate($conn, $pr_id); }
         if ($nuovo_turno_id > 0 && $nuovo_turno_id !== $turno_attuale_id) {
             $res_promo = $conn->query("SELECT * FROM prenotazioni WHERE turno_id = $turno_attuale_id AND stato = 'in_attesa' ORDER BY data_prenotazione ASC LIMIT 1");
             if ($res_promo && $u_promo = $res_promo->fetch_assoc()) {
                 $id_promo = (int)$u_promo['id'];
                 $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = $id_promo");
+                decadi_attese_vincolate($conn, $id_promo);
 
                 $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
                 $domain = $_SERVER['HTTP_HOST'] ?? 'localhost';
@@ -222,22 +215,23 @@ if (isset($_GET['cancella_prenotazione'])) {
     csrf_verify($_GET['csrf'] ?? '');
     $pr_id = (int)$_GET['cancella_prenotazione'];
 
-    $stmt_chk = $conn->prepare("SELECT pr.*, t.id as turno_id, t.data_turno, t.orario_inizio, t.orario_fine, e.titolo as evento_titolo, e.luogo, e.pagina_id FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE pr.id = ? AND (pr.utente_id = ? OR LOWER(pr.email) = ?)");
+    $stmt_chk = $conn->prepare("SELECT pr.*, t.id as turno_id, t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine, e.titolo as evento_titolo, e.luogo, e.pagina_id, e.id as evento_id FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE pr.id = ? AND (pr.utente_id = ? OR LOWER(pr.email) = ?)");
     $stmt_chk->bind_param("iis", $pr_id, $u_id, $u_email_sql);
     $stmt_chk->execute();
     $res_chk = $stmt_chk->get_result();
     
     if ($res_chk && $res_chk->num_rows > 0) {
         $p_data = $res_chk->fetch_assoc();
-        $was_confermata = ($p_data['stato'] === 'confermata');
+        // Anche un posto offerto e non ancora confermato va ripassato alla coda
+        $was_confermata = in_array($p_data['stato'], ['confermata', 'richiesta_conferma'], true);
         $tid_promo = (int)$p_data['turno_id'];
 
         // Fix: UPDATE stato='annullata' invece di DELETE, così la riga resta
         // nel DB per storico/audit e non ricompare nel listing (filtrato sotto).
         $conn->query("UPDATE prenotazioni SET stato = 'annullata' WHERE id = $pr_id");
 
-        $data_formatted = date('d/m/Y', strtotime($p_data['data_turno']));
-        $ora_formatted = substr($p_data['orario_inizio'], 0, 5) . ' - ' . substr($p_data['orario_fine'], 0, 5);
+        $data_formatted = implode(' · ', array_filter([$p_data['nome_turno'] ?? '', !empty($p_data['data_turno']) ? date('d/m/Y', strtotime($p_data['data_turno'])) : '']));
+        $ora_formatted = orario_turno($p_data) ?: 'da definire';
         $r_find = ['{NOME}', '{COGNOME}', '{MATRICOLA}', '{TITOLO_EVENTO}', '{DATA_TURNO}', '{ORARIO_TURNO}', '{LUOGO}', '{CODICE_PRENOTAZIONE}', '{LINK_RICEVUTA}'];
         $r_repl = [$p_data['nome'], $p_data['cognome'], $p_data['matricola'], $p_data['evento_titolo'], $data_formatted, $ora_formatted, $p_data['luogo'], $p_data['codice_prenotazione'], ''];
 
@@ -247,24 +241,10 @@ if (isset($_GET['cancella_prenotazione'])) {
         $body_tpl = $sys_email['email_canc_utente_corpo'] ?: "<p>Gentile <strong>{NOME} {COGNOME}</strong>,</p><p>La tua prenotazione per l'evento <strong>{TITOLO_EVENTO}</strong> è stata cancellata con successo.</p>";
         inviaNotificaEmail($p_data['email'], str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn);
 
-        $pagina_id_curr = (int)$p_data['pagina_id'];
-        $res_p_gest = $conn->query("SELECT gestore_utente_id, gestori_utenti_ids FROM pagine_eventi WHERE id = $pagina_id_curr LIMIT 1");
-        if ($res_p_gest && $row_p_gest = $res_p_gest->fetch_assoc()) {
-            $ids_gest = array_filter(explode(',', $row_p_gest['gestori_utenti_ids'] ?? ''));
-            if ((int)$row_p_gest['gestore_utente_id'] > 0) { $ids_gest[] = (int)$row_p_gest['gestore_utente_id']; }
-            $ids_gest = array_unique(array_map('intval', $ids_gest));
-
-            if (!empty($ids_gest)) {
-                $in_ids = implode(',', $ids_gest);
-                $res_u_gest = $conn->query("SELECT email FROM utenti WHERE id IN ($in_ids) AND email IS NOT NULL AND email != ''");
-                if ($res_u_gest && $res_u_gest->num_rows > 0) {
-                    $obj_gest = "Avviso Disdetta: " . $p_data['evento_titolo'];
-                    $body_gest = "<p>Gentile Gestore,</p><p>L'utente <strong>" . htmlspecialchars($p_data['nome'] . ' ' . $p_data['cognome']) . "</strong> ha appena <strong>annullato</strong> la sua prenotazione per l'evento <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong> del $data_formatted.</p>";
-                    while ($u_gest = $res_u_gest->fetch_assoc()) {
-                        if (!empty($u_gest['email'])) inviaNotificaEmail($u_gest['email'], $obj_gest, $body_gest, $conn);
-                    }
-                }
-            }
+        $obj_gest = "Avviso Disdetta: " . $p_data['evento_titolo'];
+        $body_gest = "<p>Gentile Gestore,</p><p>L'utente <strong>" . htmlspecialchars($p_data['nome'] . ' ' . $p_data['cognome']) . "</strong> ha appena <strong>annullato</strong> la sua prenotazione per l'evento <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong> del " . htmlspecialchars($data_formatted) . ".</p>";
+        foreach (get_email_gestori_evento($conn, (int)$p_data['evento_id']) as $em_gest) {
+            inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn);
         }
 
         if ($was_confermata) {
@@ -272,6 +252,7 @@ if (isset($_GET['cancella_prenotazione'])) {
             if ($res_promo && $u_promo = $res_promo->fetch_assoc()) {
                 $id_promo = (int)$u_promo['id'];
                 $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = $id_promo");
+                decadi_attese_vincolate($conn, $id_promo);
 
                 $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
                 $domain = $_SERVER['HTTP_HOST'] ?? 'localhost';
@@ -296,13 +277,90 @@ if (isset($_GET['cancella_prenotazione'])) {
 }
 
 // =======================================================================
+// AZIONE: CONFERMA / RINUNCIA POSTO LIBERATO DALLA LISTA D'ATTESA
+// Il link nell'email (promuovi_lista_attesa) apre solo il riquadro di scelta;
+// la conferma vera e propria avviene via POST con CSRF.
+// =======================================================================
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['conferma_posto_ok']) || isset($_POST['rinuncia_posto']))) {
+    csrf_verify($_POST['csrf_token'] ?? '');
+    $pr_id    = (int)($_POST['pr_id'] ?? 0);
+    $conferma = isset($_POST['conferma_posto_ok']);
+
+    $conn->begin_transaction();
+    $stmt_cp = $conn->prepare("SELECT pr.*, t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine, e.titolo AS evento_titolo, e.luogo
+                               FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id
+                               WHERE pr.id = ? AND (pr.utente_id = ? OR LOWER(pr.email) = ?) FOR UPDATE");
+    $stmt_cp->bind_param("iis", $pr_id, $u_id, $u_email_sql);
+    $stmt_cp->execute();
+    $p_cp = $stmt_cp->get_result()->fetch_assoc();
+
+    $scaduta = $p_cp && (($p_cp['stato'] === 'scaduta')
+            || ($p_cp['stato'] === 'richiesta_conferma' && !empty($p_cp['scadenza_conferma']) && $p_cp['scadenza_conferma'] < date('Y-m-d H:i:s')));
+    if (!$p_cp || $p_cp['stato'] !== 'richiesta_conferma' || $scaduta) {
+        $conn->rollback();
+        $motivo = $scaduta ? "Il tempo per confermare il posto è scaduto e il posto è stato riassegnato."
+                           : "Questa offerta di posto non è più valida.";
+        $_SESSION['msg_area_pers'] = "<div class='alert alert-warning fw-bold text-center my-3 shadow-sm'><i class='fa fa-clock me-1'></i> $motivo</div>";
+        header("Location: area_personale.php");
+        exit;
+    }
+
+    $nuovo_stato_cp = $conferma ? 'confermata' : 'annullata';
+    $stmt_up_cp = $conn->prepare("UPDATE prenotazioni SET stato = ? WHERE id = ?");
+    $stmt_up_cp->bind_param("si", $nuovo_stato_cp, $pr_id);
+    if (!$stmt_up_cp->execute()) {
+        $conn->rollback();
+        $_SESSION['msg_area_pers'] = "<div class='alert alert-danger fw-bold text-center my-3 shadow-sm'><i class='fa fa-times-circle me-1'></i> Errore durante il salvataggio. Riprova.</div>";
+        header("Location: area_personale.php");
+        exit;
+    }
+    $conn->commit();
+
+    if ($conferma) {
+        decadi_attese_vincolate($conn, $pr_id);
+        $link_ricevuta_cp = url_base_sito() . "/stampa_ricevuta.php?code=" . urlencode($p_cp['codice_prenotazione']);
+        $body_cp = "<p>Gentile <strong>" . htmlspecialchars($p_cp['nome'] . ' ' . $p_cp['cognome']) . "</strong>,</p>"
+                 . "<p>hai confermato il tuo posto per <strong>" . htmlspecialchars($p_cp['evento_titolo']) . "</strong> (" . htmlspecialchars(etichetta_turno($p_cp)) . "). La prenotazione è <strong>CONFERMATA</strong>.</p>"
+                 . "<p style='margin-top:15px;'><a href='$link_ricevuta_cp' target='_blank' style='background:#B80000; color:#ffffff; padding:10px 18px; text-decoration:none; border-radius:6px; font-weight:bold;'>📄 Scarica / Stampa Ricevuta PDF</a></p>";
+        inviaNotificaEmail($p_cp['email'], "Prenotazione CONFERMATA: " . $p_cp['evento_titolo'], $body_cp, $conn);
+        $_SESSION['msg_area_pers'] = "<div class='alert alert-success fw-bold text-center my-3 shadow-sm border-0 border-start border-5 border-success'><i class='fa fa-check-circle me-1'></i> Posto confermato! Ti abbiamo inviato la ricevuta via email.</div>";
+    } else {
+        // Il posto passa subito al prossimo in lista d'attesa
+        promuovi_lista_attesa($conn, (int)$p_cp['turno_id']);
+        $_SESSION['msg_area_pers'] = "<div class='alert alert-info fw-bold text-center my-3 shadow-sm'><i class='fa fa-info-circle me-1'></i> Hai rinunciato al posto. Grazie per averlo lasciato ad altri.</div>";
+    }
+    header("Location: area_personale.php");
+    exit;
+}
+
+$box_conferma_posto = null;
+if (isset($_GET['conferma_posto'])) {
+    $pr_id_cp = (int)$_GET['conferma_posto'];
+    $stmt_cp = $conn->prepare("SELECT pr.id, pr.stato, pr.scadenza_conferma, pr.num_posti, t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine, e.titolo AS evento_titolo, e.luogo
+                               FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id
+                               WHERE pr.id = ? AND (pr.utente_id = ? OR LOWER(pr.email) = ?)");
+    $stmt_cp->bind_param("iis", $pr_id_cp, $u_id, $u_email_sql);
+    $stmt_cp->execute();
+    $row_cp = $stmt_cp->get_result()->fetch_assoc();
+    if ($row_cp && $row_cp['stato'] === 'richiesta_conferma') {
+        $box_conferma_posto = $row_cp;
+    } elseif ($row_cp && $row_cp['stato'] === 'confermata') {
+        $_SESSION['msg_area_pers'] = "<div class='alert alert-success fw-bold text-center my-3 shadow-sm'><i class='fa fa-check-circle me-1'></i> Questo posto è già confermato.</div>";
+    } elseif ($row_cp && $row_cp['stato'] === 'scaduta') {
+        $_SESSION['msg_area_pers'] = "<div class='alert alert-warning fw-bold text-center my-3 shadow-sm'><i class='fa fa-clock me-1'></i> Il tempo per confermare il posto è scaduto e il posto è stato riassegnato.</div>";
+    } else {
+        $_SESSION['msg_area_pers'] = "<div class='alert alert-warning fw-bold text-center my-3 shadow-sm'><i class='fa fa-exclamation-triangle me-1'></i> Offerta di posto non valida o non più disponibile.</div>";
+    }
+}
+
+// =======================================================================
 // ESTRAZIONE DATI PRENOTAZIONI DELL'UTENTE E TURNI ALTERNATIVI
 // =======================================================================
 $prenotazioni_attive = [];
 $prenotazioni_passate = [];
 $now = date('Y-m-d H:i:s');
 
-$sql_pr = "SELECT pr.*, t.data_turno, t.orario_inizio, t.orario_fine,
+$sql_pr = "SELECT pr.*, t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine,
            e.titolo as evento_titolo, e.luogo as evento_luogo, e.id as evento_id, e.locandina_path, e.abilita_presenze,
            pe.titolo as pagina_titolo, pe.colore_primario, pe.id as p_id
            FROM prenotazioni pr
@@ -336,9 +394,8 @@ $righe_prenotazioni = [];
 $evento_ids_per_alternativi = [];
 if ($res_list) {
     while ($row = $res_list->fetch_assoc()) {
-        $fine_evento = $row['data_turno'] . ' ' . $row['orario_fine'];
         $row['turni_alternativi'] = [];
-        $row['_is_attiva'] = ($fine_evento >= $now);
+        $row['_is_attiva'] = !turno_concluso($row);
         if ($row['_is_attiva']) {
             $evento_ids_per_alternativi[(int)$row['evento_id']] = true;
         }
@@ -352,10 +409,10 @@ if (!empty($evento_ids_per_alternativi)) {
     $ev_ids_list = implode(',', array_map('intval', array_keys($evento_ids_per_alternativi)));
 
     // Query 2: tutti i turni futuri di tutti gli eventi coinvolti, in un colpo solo
-    $res_alt_batch = $conn->query("SELECT id, evento_id, data_turno, orario_inizio, orario_fine, max_posti, data_apertura, data_chiusura
+    $res_alt_batch = $conn->query("SELECT id, evento_id, nome_turno, data_turno, orario_inizio, orario_fine, max_posti, data_apertura, data_chiusura
                                     FROM turni
-                                    WHERE evento_id IN ($ev_ids_list) AND CONCAT(data_turno, ' ', orario_inizio) > '$now'
-                                    ORDER BY data_turno ASC, orario_inizio ASC");
+                                    WHERE evento_id IN ($ev_ids_list) AND (data_turno IS NULL OR CONCAT(data_turno, ' ', COALESCE(orario_inizio, '23:59:59')) > '$now')
+                                    ORDER BY (data_turno IS NULL), data_turno ASC, orario_inizio ASC, nome_turno ASC, id ASC");
     $turno_ids_coinvolti = [];
     if ($res_alt_batch) {
         while ($ta = $res_alt_batch->fetch_assoc()) {
@@ -419,6 +476,7 @@ foreach ($all_pr_merged as $pr_s) {
 }
 
 function countdown_to($data_turno, $orario_inizio) {
+    if (empty($data_turno)) return null;
     $diff = strtotime($data_turno . ' ' . $orario_inizio) - time();
     if ($diff <= 0) return null;
     if ($diff < 3600)  return ['label' => 'Tra ' . max(1, round($diff / 60)) . ' min', 'cls' => 'danger'];
@@ -502,6 +560,29 @@ require_once 'header.php';
     }
     ?>
 
+    <?php if ($box_conferma_posto): $bc = $box_conferma_posto; ?>
+        <div class="card border-0 shadow my-4" style="border-left: 6px solid #198754 !important; border-radius: 10px;">
+            <div class="card-body p-4">
+                <h4 class="fw-bold text-success mb-2"><i class="fa fa-bell me-2"></i>Si è liberato un posto per te!</h4>
+                <p class="mb-1 fs-5 fw-bold text-dark"><?php echo htmlspecialchars($bc['evento_titolo']); ?></p>
+                <p class="mb-2 text-secondary fw-semibold">
+                    <i class="fa fa-calendar-day me-1"></i><?php echo htmlspecialchars(etichetta_turno($bc)); ?>
+                    <?php if (!empty($bc['luogo'])): ?> · <i class="fa fa-map-marker-alt me-1"></i><?php echo htmlspecialchars($bc['luogo']); ?><?php endif; ?>
+                    <?php if ((int)$bc['num_posti'] > 1): ?> · <?php echo (int)$bc['num_posti']; ?> posti<?php endif; ?>
+                </p>
+                <?php if (!empty($bc['scadenza_conferma'])): ?>
+                    <div class="alert alert-warning py-2 small fw-bold mb-3"><i class="fa fa-hourglass-half me-1"></i> Conferma entro il <?php echo date('d/m/Y \a\l\l\e H:i', strtotime($bc['scadenza_conferma'])); ?>, altrimenti il posto passerà al prossimo in lista.</div>
+                <?php endif; ?>
+                <form method="POST" action="area_personale.php" class="d-flex flex-wrap gap-2">
+                    <?php csrf_field(); ?>
+                    <input type="hidden" name="pr_id" value="<?php echo (int)$bc['id']; ?>">
+                    <button type="submit" name="conferma_posto_ok" value="1" class="btn btn-success fw-bold px-4"><i class="fa fa-check me-1"></i>Conferma il mio posto</button>
+                    <button type="submit" name="rinuncia_posto" value="1" class="btn btn-outline-secondary fw-bold" onclick="return confirm('Rinunci al posto? Verrà assegnato al prossimo in lista d\'attesa.');"><i class="fa fa-times me-1"></i>Rinuncio</button>
+                </form>
+            </div>
+        </div>
+    <?php endif; ?>
+
     <!-- MENU A TAB (RESTYLING COLORI) -->
     <ul class="nav nav-pills nav-fill gap-2 p-1 bg-light rounded-pill border mb-4 shadow-sm custom-tabs" id="pills-tab" role="tablist">
         <li class="nav-item" role="presentation">
@@ -574,8 +655,9 @@ require_once 'header.php';
 
                                 <!-- META INFO -->
                                 <div class="d-flex flex-wrap gap-3 small fw-semibold text-secondary bg-light p-2 rounded mb-3">
-                                    <span><i class="fa fa-calendar-day text-danger me-1"></i><?php echo date('d/m/Y', strtotime($pr['data_turno'])); ?></span>
-                                    <span><i class="fa fa-clock text-primary me-1"></i><?php echo substr($pr['orario_inizio'], 0, 5); ?></span>
+                                    <?php if (!empty($pr['nome_turno'])): ?><span><i class="fa fa-tag text-secondary me-1"></i><?php echo htmlspecialchars($pr['nome_turno']); ?></span><?php endif; ?>
+                                    <?php if (!empty($pr['data_turno'])): ?><span><i class="fa fa-calendar-day text-danger me-1"></i><?php echo date('d/m/Y', strtotime($pr['data_turno'])); ?></span><?php endif; ?>
+                                    <?php if (!empty($pr['orario_inizio'])): ?><span><i class="fa fa-clock text-primary me-1"></i><?php echo substr($pr['orario_inizio'], 0, 5); ?></span><?php endif; ?>
                                     <?php if (!empty($pr['evento_luogo'])): ?><span><i class="fa fa-map-marker-alt text-success me-1"></i><?php echo htmlspecialchars($pr['evento_luogo']); ?></span><?php endif; ?>
                                     <span><i class="fa fa-hashtag text-secondary me-1"></i>Ticket: <strong class="text-dark font-monospace"><?php echo $pr['codice_prenotazione']; ?></strong></span>
                                 </div>
@@ -585,6 +667,7 @@ require_once 'header.php';
                                     <div>
                                         <?php
                                         if ($st === 'in_attesa')     echo '<span class="badge bg-warning text-dark px-3 py-2"><i class="fa fa-clock me-1"></i>Lista d\'Attesa</span>';
+                                        elseif ($st === 'richiesta_conferma') echo '<span class="badge bg-warning text-dark px-3 py-2"><i class="fa fa-bell me-1"></i>Posto disponibile</span> <a href="area_personale.php?conferma_posto=' . (int)$pr['id'] . '" class="btn btn-success btn-sm fw-bold ms-1"><i class="fa fa-check me-1"></i>Conferma ora</a>';
                                         elseif ($st === 'da_approvare') echo '<span class="badge bg-info text-dark px-3 py-2"><i class="fa fa-hourglass-half me-1"></i>In Valutazione</span>';
                                         elseif ($st === 'rifiutata')  echo '<span class="badge bg-secondary px-3 py-2"><i class="fa fa-times me-1"></i>Rifiutata</span>';
                                         elseif ($st === 'annullata')  echo '<span class="badge bg-danger px-3 py-2"><i class="fa fa-ban me-1"></i>Annullata</span>';
@@ -698,17 +781,15 @@ require_once 'header.php';
                                                     <?php
                                                     foreach ($pr['turni_alternativi'] as $ta) {
                                                         $sel = ($ta['id'] == $pr['turno_id']) ? 'selected' : '';
-                                                        $d_t = date('d/m/Y', strtotime($ta['data_turno']));
-                                                        $o_i = substr($ta['orario_inizio'],0,5);
-                                                        $o_f = substr($ta['orario_fine'],0,5);
-                                                        
+                                                        $lbl_ta = htmlspecialchars(etichetta_turno($ta));
+
                                                         if ($ta['id'] == $pr['turno_id']) {
-                                                            echo "<option value='{$ta['id']}' selected>📅 $d_t ($o_i - $o_f) — [Il tuo turno attuale]</option>";
+                                                            echo "<option value='{$ta['id']}' selected>📅 $lbl_ta — [Il tuo turno attuale]</option>";
                                                         } elseif (!$ta['is_closed']) {
                                                             if ($ta['posti_liberi'] >= $pr['num_posti']) {
-                                                                echo "<option value='{$ta['id']}'>📅 $d_t ($o_i - $o_f) — ✅ Disponibile ({$ta['posti_liberi']} posti)</option>";
+                                                                echo "<option value='{$ta['id']}'>📅 $lbl_ta — ✅ Disponibile ({$ta['posti_liberi']} posti)</option>";
                                                             } else {
-                                                                echo "<option value='{$ta['id']}'>📅 $d_t ($o_i - $o_f) — ⏳ Esaurito (Finirai in Lista d'Attesa)</option>";
+                                                                echo "<option value='{$ta['id']}'>📅 $lbl_ta — ⏳ Esaurito (Finirai in Lista d'Attesa)</option>";
                                                             }
                                                         }
                                                     }
@@ -806,8 +887,7 @@ require_once 'header.php';
                                 </div>
 
                                 <div class="d-flex flex-wrap gap-3 small fw-semibold text-secondary mb-3">
-                                    <span><i class="fa fa-calendar-day me-1"></i><?php echo date('d/m/Y', strtotime($pr['data_turno'])); ?></span>
-                                    <span><i class="fa fa-clock me-1"></i><?php echo substr($pr['orario_inizio'], 0, 5); ?></span>
+                                    <span><i class="fa fa-calendar-day me-1"></i><?php echo htmlspecialchars(etichetta_turno($pr)); ?></span>
                                     <span class="font-monospace"><i class="fa fa-hashtag me-1"></i><?php echo $pr['codice_prenotazione']; ?></span>
                                 </div>
 
@@ -952,7 +1032,7 @@ require_once 'header.php';
                             <div class="card-body p-4 d-flex flex-column flex-md-row justify-content-between align-items-center gap-3">
                                 <div>
                                     <h5 class="fw-bold text-dark m-0 mb-1"><?php echo htmlspecialchars($sondaggio['titolo']); ?></h5>
-                                    <span class="text-muted small fw-bold"><i class="fa fa-calendar-day me-1"></i> Evento del: <?php echo date('d/m/Y', strtotime($sondaggio['data'])); ?></span>
+                                    <?php if (!empty($sondaggio['data'])): ?><span class="text-muted small fw-bold"><i class="fa fa-calendar-day me-1"></i> Evento del: <?php echo date('d/m/Y', strtotime($sondaggio['data'])); ?></span><?php endif; ?>
                                 </div>
                                 <div>
                                     <a href="<?php echo htmlspecialchars($sondaggio['link']); ?>" target="_blank" class="btn btn-info text-white fw-bold shadow-sm px-4 rounded-pill">

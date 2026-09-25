@@ -3,11 +3,11 @@
 Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipartimento DiBEST** — Università della Calabria.
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![PHP](https://img.shields.io/badge/PHP-7.4%2B-purple.svg)](https://www.php.net/)
+[![PHP](https://img.shields.io/badge/PHP-8.2%2B-purple.svg)](https://www.php.net/)
 [![MySQL](https://img.shields.io/badge/MySQL-5.7%2B-orange.svg)](https://www.mysql.com/)
-[![Demo](https://img.shields.io/badge/Demo-Live-green.svg)](https://dibest2.unical.it/eventi/)
+[![Guardalo live](https://img.shields.io/badge/Guardalo-Live-green.svg)](https://dibest2.unical.it/eventi/)
 
-**Demo live:** https://dibest2.unical.it/eventi/
+**Guardalo live:** https://dibest2.unical.it/eventi/
 
 ---
 
@@ -19,8 +19,10 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 - **RBAC** a 3 livelli: Super Admin, Gestore Area/Evento, Utente
 - **Check-in** tramite QR code (scanner da browser, self check-in studente) con email attestato automatica post-check-in
 - **Attestati** PDF generati automaticamente al completamento dell'evento
-- **Sondaggi/questionari** collegabili agli eventi con export XLS
-- **Dashboard amministrativa** con KPI, grafici (Chart.js), messaggi non letti, export CSV/Excel e stampa PDF
+- **Sondaggi/questionari** collegabili agli eventi: 15 tipi di campo (rating, NPS, matrice, scelta, testo, data, email…), ordinamento drag & drop, logica condizionale ("mostra se…"), anteprima interattiva, statistiche NPS ed export XLS
+- **Dashboard amministrativa** con KPI, grafici (Chart.js), messaggi non letti
+- **Statistiche & report**: presenze effettive, tasso di presenza, annullate, riempimento, trend iscrizioni 30 giorni, presenti vs assenti per evento, vista Live/Storico, export CSV/Excel e stampa PDF
+- **Menu di navigazione** a 3 livelli con ordinamento drag & drop
 - **Profilo utente**: pagina dedicata con dati SSO e modifica email personale
 - **Form builder** per campi prenotazione personalizzati per area/evento
 - **Email automatiche**: conferma, cancellazione, promemoria (via SMTP configurabile)
@@ -38,7 +40,7 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 
 | Componente | Versione minima |
 |---|---|
-| PHP | 7.4+ (testato fino a 8.2) |
+| PHP | 8.2+ |
 | MySQL / MariaDB | 5.7+ / 10.3+ |
 | Web server | Apache (mod_rewrite) o Nginx |
 | SimpleSAMLphp | 1.19+ (solo per SSO istituzionale) |
@@ -48,6 +50,7 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 - Font Awesome 6.4
 - DataTables
 - Chart.js
+- SortableJS (drag & drop)
 - PHPMailer (incluso in `mailer.php`)
 
 ---
@@ -127,14 +130,15 @@ Il tipo viene riconosciuto tramite gli attributi `matricola_studente` e `matrico
 ```
 eventidibest-cms/
 ├── admin/              # Pannello di amministrazione
-│   ├── admin_header.php    # Autenticazione, RBAC, sidebar
-│   ├── dashboard.php       # Dashboard con KPI e grafici
-│   ├── eventi.php          # CRUD eventi e turni
+│   ├── admin_header.php        # Autenticazione, RBAC, sidebar
+│   ├── dashboard.php           # Dashboard con KPI e grafici
+│   ├── eventi.php              # CRUD eventi e turni
 │   ├── iscritti.php            # Gestione prenotazioni (ricerca, presenza, attestati)
 │   ├── stampa_lista_iscritti.php # Vista stampabile/PDF lista iscritti
 │   ├── messaggi.php            # Sistema messaggistica admin<->utente
-│   ├── sondaggi.php            # Questionari e feedback
-│   ├── statistiche.php         # KPI, grafici, export CSV/Excel, stampa PDF
+│   ├── sondaggi.php            # Questionari: campi, logica condizionale, statistiche
+│   ├── menu.php                # Menu a 3 livelli con drag & drop
+│   ├── statistiche.php         # KPI presenze, trend, Live/Storico, export CSV/Excel
 │   ├── audit_log.php           # Log attivita sistema
 │   └── ...
 ├── database/
@@ -147,7 +151,6 @@ eventidibest-cms/
 ├── mailer.php          # Wrapper PHPMailer
 ├── install.php         # Installer guidato (da eliminare dopo l'uso)
 ├── index.php           # Homepage pubblica
-├── prenota.php         # Form prenotazione pubblica
 ├── checkin.php         # Check-in via QR (admin)
 ├── self_checkin.php    # Self check-in studente
 ├── area_personale.php  # Area utente loggato (prenotazioni, messaggi)
@@ -174,7 +177,7 @@ Il database e` composto da **18 tabelle**:
 | `campi_form` | Campi custom del form prenotazione per area/evento |
 | `messaggi_prenotazioni` | Chat admin ↔ utente per ogni prenotazione |
 | `sondaggi` | Questionari collegati agli eventi |
-| `sondaggi_domande` | Domande del questionario |
+| `sondaggi_domande` | Domande del questionario (ordine e condizione di visibilità) |
 | `sondaggi_risposte` | Risposte anonime |
 | `template_email` | Template email personalizzabili |
 | `impostazioni_sistema` | Config SMTP e template email di sistema |

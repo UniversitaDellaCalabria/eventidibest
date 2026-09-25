@@ -34,14 +34,14 @@ $where = "WHERE e.pagina_id = $filtro_p AND e.archiviato = $is_archivio $cond_tu
 $sql = "SELECT pr.codice_prenotazione, IFNULL(pr.stato, 'confermata') as stato, pr.presente,
                pr.nome, pr.cognome, pr.email,
                COALESCE(NULLIF(pr.matricola,''), u.matricola_studente, u.matricola_dipendente) as matricola,
-               pr.num_posti, t.data_turno, t.orario_inizio, e.titolo as evento_titolo,
+               pr.num_posti, t.nome_turno, t.data_turno, t.orario_inizio, e.titolo as evento_titolo,
                pr.data_prenotazione
         FROM prenotazioni pr
         JOIN turni t ON pr.turno_id = t.id
         JOIN eventi e ON t.evento_id = e.id
         LEFT JOIN utenti u ON pr.utente_id = u.id
         $where
-        ORDER BY e.titolo ASC, t.data_turno ASC, pr.cognome ASC
+        ORDER BY e.titolo ASC, (t.data_turno IS NULL), t.data_turno ASC, t.nome_turno ASC, pr.cognome ASC
         LIMIT 2000";
 
 $res = $conn->query($sql);
@@ -124,7 +124,7 @@ ob_end_clean();
                 <th>Email</th>
                 <th>Matricola</th>
                 <th>Evento</th>
-                <th>Data Turno</th>
+                <th>Turno</th>
                 <th>Ora</th>
                 <th>Posti</th>
                 <th>Stato</th>
@@ -147,8 +147,8 @@ ob_end_clean();
                     <td style="font-size:9px;"><?php echo htmlspecialchars($r['email']); ?></td>
                     <td><?php echo htmlspecialchars($r['matricola'] ?? ''); ?></td>
                     <td><?php echo htmlspecialchars($r['evento_titolo']); ?></td>
-                    <td><?php echo date('d/m/Y', strtotime($r['data_turno'])); ?></td>
-                    <td><?php echo substr($r['orario_inizio'], 0, 5); ?></td>
+                    <td><?php echo htmlspecialchars(implode(' · ', array_filter([$r['nome_turno'] ?? '', !empty($r['data_turno']) ? date('d/m/Y', strtotime($r['data_turno'])) : '']))); ?></td>
+                    <td><?php echo !empty($r['orario_inizio']) ? substr($r['orario_inizio'], 0, 5) : ''; ?></td>
                     <td style="text-align:center;"><?php echo (int)$r['num_posti']; ?></td>
                     <td class="<?php echo $stato_cls; ?>"><?php echo htmlspecialchars($etichette_stato[$stato_val] ?? $stato_val); ?></td>
                     <td class="<?php echo $r['presente'] ? 'presente-si' : 'presente-no'; ?>">

@@ -82,11 +82,18 @@ if (isset($_POST['add_nuova_pagina']) && $is_full_admin) {
             }
             
             $template_code = "<?php\n\$page_slug = '{$slug}';\nrequire_once 'master_template.php';\n?>";
-            file_put_contents(dirname(__DIR__) . '/' . $slug . '.php', $template_code);
+            $ok_pag = @file_put_contents(dirname(__DIR__) . '/' . $slug . '.php', $template_code);
             $archive_code = "<?php\n\$page_slug = '{$slug}';\nrequire_once 'master_archivio.php';\n?>";
-            file_put_contents(dirname(__DIR__) . '/' . $slug . '_archivio.php', $archive_code);
-            
-            flash_set("Area $titolo_p e pagina archivio create!");
+            $ok_arc = @file_put_contents(dirname(__DIR__) . '/' . $slug . '_archivio.php', $archive_code);
+
+            if ($ok_pag === false || $ok_arc === false) {
+                error_log("[admin_header] Impossibile scrivere {$slug}.php / {$slug}_archivio.php in " . dirname(__DIR__));
+                flash_set("Area \"$titolo_p\" creata nel database, ma il server NON ha i permessi per creare i file {$slug}.php e {$slug}_archivio.php "
+                    . "nella cartella del sito. Creali a mano: {$slug}.php con   <?php \$page_slug = '{$slug}'; require_once 'master_template.php';   "
+                    . "e {$slug}_archivio.php con   <?php \$page_slug = '{$slug}'; require_once 'master_archivio.php';", 'warning');
+            } else {
+                flash_set("Area $titolo_p e pagina archivio create!");
+            }
             echo "<script>window.location.replace('impostazioni_area.php?p_id=$new_id');</script>";
             exit;
         }
@@ -354,6 +361,14 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                     </a>
                 </li>
                 <?php endif; ?>
+
+                <?php if ($can_manage_form): ?>
+                <li class="nav-item">
+                    <a class="nav-link w-100 <?php echo ($current_page == 'form_builder.php') ? 'active' : ''; ?>" href="form_builder.php?p_id=<?php echo $filtro_p; ?>">
+                        <i class="fa fa-list-check me-2 text-center" style="width:20px;"></i> Form Builder
+                    </a>
+                </li>
+                <?php endif; ?>
                 
                 <?php if ($can_manage_iscritti): ?>
                 <li class="nav-item mt-2">
@@ -384,7 +399,7 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                     </li>
                 <?php endif; ?>
                 
-                <?php if ($can_manage_settings || $can_manage_form || $is_full_admin): ?>
+                <?php if ($can_manage_settings || $is_full_admin): ?>
                     <li class="nav-item mt-3 mb-2">
                         <div class="text-secondary small fw-bold px-3 mb-1 text-uppercase">Configurazione Pagina</div>
                     </li>
@@ -392,13 +407,6 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                         <li class="nav-item">
                             <a class="nav-link w-100 <?php echo ($current_page == 'impostazioni_area.php') ? 'active' : ''; ?>" href="impostazioni_area.php?p_id=<?php echo $filtro_p; ?>">
                                 <i class="fa fa-paint-brush me-2 text-center" style="width:20px;"></i> Impostazioni Area
-                            </a>
-                        </li>
-                    <?php endif; ?>
-                    <?php if ($can_manage_form): ?>
-                        <li class="nav-item">
-                            <a class="nav-link w-100 <?php echo ($current_page == 'form_builder.php') ? 'active' : ''; ?>" href="form_builder.php?p_id=<?php echo $filtro_p; ?>">
-                                <i class="fa fa-list-check me-2 text-center" style="width:20px;"></i> Form Builder
                             </a>
                         </li>
                     <?php endif; ?>
@@ -421,13 +429,8 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                         <div class="text-secondary small fw-bold px-3 mb-1 text-uppercase">Sicurezza & Server</div>
                     </li>
                     <li class="nav-item">
-                        <a href="utenti.php" class="nav-link text-white <?php echo basename($_SERVER['PHP_SELF']) == 'utenti.php' ? 'active bg-danger' : ''; ?>">
-                            <i class="fa fa-users-cog me-2"></i> Utenti & Gruppi
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a href="abilitazioni.php" class="nav-link text-white <?php echo basename($_SERVER['PHP_SELF']) == 'abilitazioni.php' ? 'active bg-danger' : ''; ?>">
-                            <i class="fa fa-key me-2"></i> Abilitazioni Gestori
+                        <a href="utenti.php?p_id=<?php echo $filtro_p; ?>" class="nav-link w-100 <?php echo ($current_page == 'utenti.php') ? 'active' : ''; ?>">
+                            <i class="fa fa-users-cog me-2 text-center" style="width:20px;"></i> Utenti & Abilitazioni
                         </a>
                     </li>
                     <li class="nav-item">

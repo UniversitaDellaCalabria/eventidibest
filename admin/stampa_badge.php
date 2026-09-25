@@ -188,7 +188,7 @@ if (isset($_POST['avvia_stampa'])) {
                     <optgroup label="<?php echo mb_strimwidth(htmlspecialchars($ev_m['titolo']), 0, 50, '...'); ?>">
                         <?php foreach ($ev_m['turni'] as $t_m): ?>
                             <option value="<?php echo $t_m['id']; ?>">
-                                📅 <?php echo date('d/m/Y', strtotime($t_m['data_turno'])); ?> (Ore <?php echo substr($t_m['orario_inizio'],0,5); ?>)
+                                📅 <?php echo htmlspecialchars(etichetta_turno($t_m)); ?>
                             </option>
                         <?php endforeach; ?>
                     </optgroup>

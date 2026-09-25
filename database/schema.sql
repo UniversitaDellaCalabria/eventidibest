@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS `pagine_eventi` (
     `id`                        int(11)      NOT NULL AUTO_INCREMENT,
     `gestore_utente_id`         int(11)      DEFAULT 0,
     `gestori_utenti_ids`        varchar(255) DEFAULT '',
+    `notifiche_gestori_ids`     text         DEFAULT NULL,
     `titolo`                    varchar(255) NOT NULL,
     `sottotitolo`               varchar(255) DEFAULT '',
     `slug`                      varchar(150) NOT NULL,
@@ -131,6 +132,8 @@ CREATE TABLE IF NOT EXISTS `pagine_eventi` (
     `hero_banner_path`          varchar(255) DEFAULT '',
     `sidebar_immagine_path`     varchar(255) DEFAULT '',
     `ordine`                    int(11)      DEFAULT 0,
+    `mostra_in_home`            tinyint(1)   NOT NULL DEFAULT 1,
+    `limite_iscrizioni`         varchar(20)  NOT NULL DEFAULT 'nessuno',
     PRIMARY KEY (`id`),
     UNIQUE KEY `slug` (`slug`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -172,9 +175,10 @@ CREATE TABLE IF NOT EXISTS `eventi` (
 CREATE TABLE IF NOT EXISTS `turni` (
     `id`                    int(11)  NOT NULL AUTO_INCREMENT,
     `evento_id`             int(11)  NOT NULL,
-    `data_turno`            date     NOT NULL,
-    `orario_inizio`         time     NOT NULL,
-    `orario_fine`           time     NOT NULL,
+    `nome_turno`            varchar(150) DEFAULT NULL,
+    `data_turno`            date     DEFAULT NULL,
+    `orario_inizio`         time     DEFAULT NULL,
+    `orario_fine`           time     DEFAULT NULL,
     `max_posti`             int(11)  DEFAULT 30,
     `data_apertura`         datetime DEFAULT NULL,
     `data_chiusura`         datetime DEFAULT NULL,
@@ -265,8 +269,10 @@ CREATE TABLE IF NOT EXISTS `sondaggi_domande` (
     `id`            int(11)      NOT NULL AUTO_INCREMENT,
     `sondaggio_id`  int(11)      NOT NULL,
     `testo_domanda` varchar(500) NOT NULL,
-    `tipo`          varchar(50)  DEFAULT 'testo' COMMENT 'testo | scelta_singola | scelta_multipla | valutazione',
+    `tipo`          varchar(50)  DEFAULT 'text' COMMENT 'rating | nps | matrice | radio | select | checkboxes | text | textarea | number | date | email | tel | url | time | separator',
+    `obbligatorio`  tinyint(1)   DEFAULT 0,
     `opzioni`       text         DEFAULT NULL,
+    `condizione_json` text       DEFAULT NULL COMMENT '{"se_id": domanda_id, "se_val": "valore"}',
     `ordine`        int(11)      DEFAULT 0,
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

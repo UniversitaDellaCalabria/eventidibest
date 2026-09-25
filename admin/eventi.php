@@ -10,6 +10,38 @@ if (!$can_manage_eventi) {
 
 function admin_redirect($url) { echo "<script>window.location.replace('$url');</script>"; exit; }
 
+// Mostra l'errore invece della pagina bianca
+set_exception_handler(function (Throwable $e) {
+    error_log('[admin/eventi.php] ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
+    echo "<div class='alert alert-danger fw-bold m-4'><i class='fa fa-bug me-2'></i>Errore durante il salvataggio: "
+       . htmlspecialchars($e->getMessage()) . " <small class='d-block fw-normal mt-1'>(riga " . (int)$e->getLine() . ")</small></div>";
+    exit;
+});
+
+// Legge i campi turno dal POST: stringhe vuote -> NULL. Ritorna null se mancano sia nome che data.
+function leggi_turno_post(): ?array {
+    $v = fn($k) => (isset($_POST[$k]) && trim($_POST[$k]) !== '') ? trim($_POST[$k]) : null;
+    $t = [
+        'nome'  => $v('nome_turno'),
+        'data'  => $v('data_turno'),
+        'in'    => $v('orario_inizio'),
+        'fi'    => $v('orario_fine'),
+        'max'   => (int)($_POST['max_posti'] ?? 30),
+        'ap'    => $v('data_apertura'),
+        'ch'    => $v('data_chiusura'),
+        'wa'    => isset($_POST['abilita_lista_attesa']) ? 1 : 0,
+        'mp'    => isset($_POST['abilita_multi_posto']) ? 1 : 0,
+        'app'   => isset($_POST['richiede_approvazione']) ? 1 : 0,
+    ];
+    return ($t['nome'] === null && $t['data'] === null) ? null : $t;
+}
+
+function inserisci_turno($conn, int $ev_id, array $t): void {
+    $stmt = $conn->prepare("INSERT INTO turni (evento_id, nome_turno, data_turno, orario_inizio, orario_fine, max_posti, data_apertura, data_chiusura, abilita_lista_attesa, abilita_multi_posto, richiede_approvazione) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+    $stmt->bind_param("issssissiii", $ev_id, $t['nome'], $t['data'], $t['in'], $t['fi'], $t['max'], $t['ap'], $t['ch'], $t['wa'], $t['mp'], $t['app']);
+    $stmt->execute();
+}
+
 if (isset($_POST['add_sottocategoria'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $p_id = (int)($_POST['pagina_id'] ?? $filtro_p);
@@ -49,24 +81,12 @@ if (isset($_POST['add_evento'])) {
     }
 
     $stmt_ev = $conn->prepare("INSERT INTO eventi (pagina_id, sottocategoria_id, titolo, luogo, descrizione, locandina_path, allegato_pdf, is_evidenza, richiede_prenotazione, abilita_presenze, ruolo_accesso_id, ordine, gestori_utenti_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')");
-    $stmt_ev->bind_param("iisssssiiiiii", $filtro_p, $sub_id, $titolo, $luogo, $desc, $locandina_path, $allegato_pdf, $evid, $req_pren, $abilita_pres, $ruolo_acc, $ord);
+    $stmt_ev->bind_param("iisssssiiiii", $filtro_p, $sub_id, $titolo, $luogo, $desc, $locandina_path, $allegato_pdf, $evid, $req_pren, $abilita_pres, $ruolo_acc, $ord);
     $stmt_ev->execute();
     $ev_id = $conn->insert_id;
 
-    if (!empty($_POST['data_turno']) && !empty($_POST['orario_inizio'])) {
-        $data_t = $_POST['data_turno'];
-        $in_t = $_POST['orario_inizio'];
-        $fi_t = $_POST['orario_fine'];
-        $max_p = (int)$_POST['max_posti'];
-        $dt_ap = !empty($_POST['data_apertura']) ? $_POST['data_apertura'] : null;
-        $dt_ch = !empty($_POST['data_chiusura']) ? $_POST['data_chiusura'] : null;
-        $wa_li = isset($_POST['abilita_lista_attesa']) ? 1 : 0;
-        $mp_en = isset($_POST['abilita_multi_posto']) ? 1 : 0;
-        $req_app = isset($_POST['richiede_approvazione']) ? 1 : 0;
-        $stmt_t = $conn->prepare("INSERT INTO turni (evento_id, data_turno, orario_inizio, orario_fine, max_posti, data_apertura, data_chiusura, abilita_lista_attesa, abilita_multi_posto, richiede_approvazione) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        $stmt_t->bind_param("isssissiii", $ev_id, $data_t, $in_t, $fi_t, $max_p, $dt_ap, $dt_ch, $wa_li, $mp_en, $req_app);
-        $stmt_t->execute();
-    }
+    $primo_turno = leggi_turno_post();
+    if ($primo_turno) inserisci_turno($conn, $ev_id, $primo_turno);
     
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Creazione Evento", ["Evento ID" => $ev_id]);
     flash_set("Evento e turni creati!");
@@ -121,19 +141,13 @@ if (isset($_POST['edit_evento'])) {
 if (isset($_POST['add_turno'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $ev_id = (int)$_POST['evento_id'];
-    $data_t = $_POST['data_turno'];
-    $in_t = $_POST['orario_inizio'];
-    $fi_t = $_POST['orario_fine'];
-    $max_p = (int)$_POST['max_posti'];
-    $dt_ap = !empty($_POST['data_apertura']) ? $_POST['data_apertura'] : null;
-    $dt_ch = !empty($_POST['data_chiusura']) ? $_POST['data_chiusura'] : null;
-    $wa_li = isset($_POST['abilita_lista_attesa']) ? 1 : 0;
-    $mp_en = isset($_POST['abilita_multi_posto']) ? 1 : 0;
-    $req_app = isset($_POST['richiede_approvazione']) ? 1 : 0;
-    $stmt_at = $conn->prepare("INSERT INTO turni (evento_id, data_turno, orario_inizio, orario_fine, max_posti, data_apertura, data_chiusura, abilita_lista_attesa, abilita_multi_posto, richiede_approvazione) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    $stmt_at->bind_param("isssissiii", $ev_id, $data_t, $in_t, $fi_t, $max_p, $dt_ap, $dt_ch, $wa_li, $mp_en, $req_app);
-    $stmt_at->execute();
-    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Aggiunta Turno", ["Evento ID" => $ev_id, "Data" => $data_t, "Max Posti" => $max_p]);
+    $nt = leggi_turno_post();
+    if (!$nt) {
+        flash_set("Inserisci almeno il nome del turno oppure la data.", "danger");
+        admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
+    }
+    inserisci_turno($conn, $ev_id, $nt);
+    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Aggiunta Turno", ["Evento ID" => $ev_id, "Turno" => etichetta_turno(['nome_turno' => $nt['nome'], 'data_turno' => $nt['data'], 'orario_inizio' => $nt['in'], 'orario_fine' => $nt['fi']]), "Max Posti" => $nt['max']]);
     flash_set("Turno aggiunto!");
     admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
 }
@@ -141,18 +155,15 @@ if (isset($_POST['add_turno'])) {
 if (isset($_POST['edit_turno'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $t_id = (int)$_POST['turno_id'];
-    $data_t = $_POST['data_turno'];
-    $in_t = $_POST['orario_inizio'];
-    $fi_t = $_POST['orario_fine'];
-    $max_p = (int)$_POST['max_posti'];
-    $dt_ap = !empty($_POST['data_apertura']) ? $_POST['data_apertura'] : null;
-    $dt_ch = !empty($_POST['data_chiusura']) ? $_POST['data_chiusura'] : null;
-    $wa_li = isset($_POST['abilita_lista_attesa']) ? 1 : 0;
-    $mp_en = isset($_POST['abilita_multi_posto']) ? 1 : 0;
-    $req_app = isset($_POST['richiede_approvazione']) ? 1 : 0;
+    $et = leggi_turno_post();
+    if (!$et) {
+        flash_set("Inserisci almeno il nome del turno oppure la data.", "danger");
+        admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
+    }
+    $max_p = $et['max'];
 
-    $stmt_et = $conn->prepare("UPDATE turni SET data_turno=?, orario_inizio=?, orario_fine=?, max_posti=?, data_apertura=?, data_chiusura=?, abilita_lista_attesa=?, abilita_multi_posto=?, richiede_approvazione=? WHERE id=?");
-    $stmt_et->bind_param("sssissiiii", $data_t, $in_t, $fi_t, $max_p, $dt_ap, $dt_ch, $wa_li, $mp_en, $req_app, $t_id);
+    $stmt_et = $conn->prepare("UPDATE turni SET nome_turno=?, data_turno=?, orario_inizio=?, orario_fine=?, max_posti=?, data_apertura=?, data_chiusura=?, abilita_lista_attesa=?, abilita_multi_posto=?, richiede_approvazione=? WHERE id=?");
+    $stmt_et->bind_param("ssssissiiii", $et['nome'], $et['data'], $et['in'], $et['fi'], $max_p, $et['ap'], $et['ch'], $et['wa'], $et['mp'], $et['app'], $t_id);
     $stmt_et->execute();
     
     // LOGICA AUTOMATICA PROMOZIONE
@@ -169,6 +180,7 @@ if (isset($_POST['edit_turno'])) {
                 $posti_richiesti = (int)$pren['num_posti'];
                 if ($posti_liberi >= $posti_richiesti) {
                     $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = {$pren['id']}");
+                    decadi_attese_vincolate($conn, (int)$pren['id']);
                     $posti_liberi -= $posti_richiesti; $promossi++;
                     if (function_exists('inviaNotificaEmail')) {
                         $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
@@ -181,7 +193,7 @@ if (isset($_POST['edit_turno'])) {
             }
         }
     }
-    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Modifica Turno", ["Turno ID" => $t_id, "Data" => $data_t, "Max Posti" => $max_p]);
+    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Modifica Turno", ["Turno ID" => $t_id, "Nome" => $et['nome'], "Data" => $et['data'], "Max Posti" => $max_p]);
     flash_set("Turno aggiornato!" . ($promossi > 0 ? " (Aggiunti $promossi utenti dalla Lista d'Attesa!)" : ""));
     admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
 }
@@ -189,7 +201,7 @@ if (isset($_POST['edit_turno'])) {
 if (isset($_POST['archivia_conclusi'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $now = date('Y-m-d H:i:s');
-    $conn->query("UPDATE eventi e SET archiviato = 1 WHERE pagina_id = $filtro_p AND NOT EXISTS (SELECT 1 FROM turni t WHERE t.evento_id = e.id AND (t.data_turno >= CURDATE() OR (t.data_chiusura IS NOT NULL AND t.data_chiusura >= '$now')))");
+    $conn->query("UPDATE eventi e SET archiviato = 1 WHERE pagina_id = $filtro_p AND NOT EXISTS (SELECT 1 FROM turni t WHERE t.evento_id = e.id AND (t.data_turno IS NULL OR t.data_turno >= CURDATE() OR (t.data_chiusura IS NOT NULL AND t.data_chiusura >= '$now')))");
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Archiviazione Bulk Eventi", ["Pagina ID" => $filtro_p]);
     flash_set("Eventi passati archiviati.");
     admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
@@ -239,7 +251,7 @@ $res_ev = $conn->query("SELECT e.*, sc.nome as nome_sottocategoria FROM eventi e
 if ($res_ev) {
     while($row = $res_ev->fetch_assoc()) {
         $turni = [];
-        $res_t = $conn->query("SELECT * FROM turni WHERE evento_id = {$row['id']} ORDER BY data_turno ASC, orario_inizio ASC");
+        $res_t = $conn->query("SELECT * FROM turni WHERE evento_id = {$row['id']} ORDER BY (data_turno IS NULL), data_turno ASC, orario_inizio ASC, nome_turno ASC, id ASC");
         if($res_t) { while($t = $res_t->fetch_assoc()) $turni[] = $t; }
         $row['turni'] = $turni;
         $tutti_gli_eventi[] = $row;
@@ -248,162 +260,247 @@ if ($res_ev) {
 }
 ?>
 
-<h4 class="fw-bold text-dark mb-4"><i class="fa fa-calendar-alt text-primary me-2"></i> Gestione Eventi e Turni</h4>
+<?php
+$col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
+?>
+<style>
+.ev-card { border-radius:12px; border:1px solid #e2e8f0; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.06); transition:box-shadow .2s; overflow:hidden; }
+.ev-card:hover { box-shadow:0 6px 20px rgba(0,0,0,.10); }
+.ev-card-accent { width:5px; flex-shrink:0; border-radius:0; }
+.turno-chip { display:flex; align-items:center; justify-content:space-between; gap:8px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:8px 12px; font-size:.82rem; }
+.turno-chip:hover { background:#f1f5f9; }
+.add-turno-toggle { background:none; border:1px dashed #94a3b8; color:#64748b; border-radius:8px; padding:7px 16px; font-size:.82rem; font-weight:600; cursor:pointer; width:100%; transition:all .15s; }
+.add-turno-toggle:hover { background:#f1f5f9; border-color:#475569; color:#1e293b; }
+</style>
 
-<div class="row">
+<div class="d-flex align-items-center justify-content-between mb-4 flex-wrap gap-2">
+    <h4 class="fw-bold text-dark mb-0"><i class="fa fa-calendar-alt me-2" style="color:<?php echo $col_area; ?>"></i>Gestione Eventi e Turni</h4>
+    <div class="d-flex gap-2 align-items-center">
+        <form method="GET" id="formFiltroEv" class="d-flex align-items-center gap-2 m-0">
+            <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+            <i class="fa fa-filter text-secondary"></i>
+            <select name="f_ev" class="form-select form-select-sm fw-bold border-0 shadow-sm" style="min-width:200px;" onchange="document.getElementById('formFiltroEv').submit();">
+                <option value="0">Tutti i tuoi Eventi</option>
+                <?php foreach($tutti_gli_eventi as $e_opt): ?>
+                    <option value="<?php echo $e_opt['id']; ?>" <?php echo $filtro_ev == $e_opt['id'] ? 'selected' : ''; ?>>
+                        <?php echo htmlspecialchars($e_opt['titolo']); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </form>
+        <?php if ($can_manage_settings): ?>
+            <form method="POST" class="m-0">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                <button type="submit" name="archivia_conclusi" class="btn btn-outline-secondary btn-sm fw-bold" data-confirm="Archiviare tutti gli eventi passati?" title="Archivia conclusi"><i class="fa fa-archive me-1"></i>Archivia vecchi</button>
+            </form>
+        <?php endif; ?>
+        <?php if ($can_manage_eventi && $is_full_admin): ?>
+            <button type="button" class="btn btn-sm fw-bold px-3 shadow-sm text-white" data-bs-toggle="modal" data-bs-target="#modCreaEvento" style="background:<?php echo $col_area; ?>;border:none;border-radius:8px;"><i class="fa fa-plus-circle me-1"></i>Crea Evento</button>
+        <?php endif; ?>
+    </div>
+</div>
+
+<div class="row g-0">
     <?php if ($can_manage_settings): ?>
-    <div class="col-md-3">
-        <div class="card mb-4 shadow-sm border-0" style="border-top: 3px solid #0056b3 !important;">
-            <div class="card-header bg-white fw-bold text-primary">Sottocategorie / Sezioni</div>
-            <div class="card-body">
-                <form method="POST" class="row g-2 mb-3">
-                    <?php csrf_field(); ?>
-                    <input type="hidden" name="pagina_id" value="<?php echo $filtro_p; ?>">
-                    <div class="col-8"><input type="text" name="nome_sottocategoria" class="form-control form-control-sm" placeholder="Nome Sezione..." required></div>
-                    <div class="col-4"><input type="number" name="ordine_sottocategoria" class="form-control form-control-sm" value="0" required></div>
-                    <div class="col-12"><button type="submit" name="add_sottocategoria" class="btn btn-primary btn-sm w-100 fw-bold">Aggiungi</button></div>
-                </form>
-                <div class="d-flex flex-column gap-1">
-                    <?php foreach($sottocategorie as $sub): ?>
-                        <div class="badge bg-light text-dark border p-2 text-start"><strong>[#<?php echo $sub['ordine']; ?>]</strong> <?php echo htmlspecialchars($sub['nome'] ?? ''); ?></div>
-                    <?php endforeach; ?>
+    <div class="col-md-3 pe-md-3 mb-4">
+        <div class="ev-card p-3" style="border-top:3px solid <?php echo $col_area; ?>;">
+            <div class="fw-bold mb-3 text-uppercase" style="font-size:.72rem;letter-spacing:.06em;color:<?php echo $col_area; ?>;"><i class="fa fa-tags me-1"></i>Sottocategorie / Sezioni</div>
+            <form method="POST" class="mb-3">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="pagina_id" value="<?php echo $filtro_p; ?>">
+                <div class="d-flex gap-1 mb-2">
+                    <input type="text" name="nome_sottocategoria" class="form-control form-control-sm" placeholder="Nome sezione..." required>
+                    <input type="number" name="ordine_sottocategoria" class="form-control form-control-sm" value="0" style="width:60px;" required>
                 </div>
+                <button type="submit" name="add_sottocategoria" class="btn btn-sm w-100 fw-bold text-white" style="background:<?php echo $col_area; ?>;border-radius:7px;">Aggiungi</button>
+            </form>
+            <div class="d-flex flex-column gap-1">
+                <?php foreach($sottocategorie as $sub): ?>
+                    <div class="d-flex align-items-center gap-2 p-2 rounded" style="background:#f8fafc;border:1px solid #e2e8f0;font-size:.82rem;">
+                        <span class="badge text-white fw-bold" style="background:<?php echo $col_area; ?>;min-width:24px;"><?php echo $sub['ordine']; ?></span>
+                        <span class="fw-semibold text-dark"><?php echo htmlspecialchars($sub['nome'] ?? ''); ?></span>
+                    </div>
+                <?php endforeach; ?>
+                <?php if(empty($sottocategorie)): ?>
+                    <div class="text-muted small text-center py-2">Nessuna sezione</div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
     <?php endif; ?>
 
     <div class="<?php echo $can_manage_settings ? 'col-md-9' : 'col-12'; ?>">
-        <div class="card shadow-sm border-0 mb-3 bg-white">
-            <div class="card-body p-2 d-flex justify-content-between align-items-center flex-wrap gap-2 rounded border">
-                <form method="GET" id="formFiltroEv" class="d-flex align-items-center gap-2 m-0 w-75">
-                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                    <i class="fa fa-filter text-secondary ms-2"></i>
-                    <select name="f_ev" class="form-select form-select-sm fw-bold border-danger text-danger shadow-sm" onchange="document.getElementById('formFiltroEv').submit();">
-                        <option value="0">Tutti i tuoi Eventi</option>
-                        <?php foreach($tutti_gli_eventi as $e_opt): ?>
-                            <option value="<?php echo $e_opt['id']; ?>" <?php echo $filtro_ev == $e_opt['id'] ? 'selected' : ''; ?>>
-                                🎯 <?php echo htmlspecialchars($e_opt['titolo']); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </form>
-                <div class="d-flex gap-2">
-                    <?php if ($can_manage_settings): ?>
-                        <form method="POST" class="m-0">
-                            <?php csrf_field(); ?>
-                            <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                            <button type="submit" name="archivia_conclusi" class="btn btn-outline-dark btn-sm fw-bold shadow-sm" data-confirm="Archiviare tutti gli eventi passati?"><i class="fa fa-archive"></i></button>
-                        </form>
-                    <?php endif; ?>
-                    <?php if ($can_manage_eventi && $is_full_admin): ?>
-                        <button type="button" class="btn btn-danger btn-sm fw-bold px-3 shadow-sm" data-bs-toggle="modal" data-bs-target="#modCreaEvento" style="background-color: #990000; border:none;"><i class="fa fa-plus-circle me-1"></i> Crea Evento</button>
-                    <?php endif; ?>
-                </div>
+        <?php if(empty($eventi)): ?>
+            <div class="ev-card p-5 text-center text-muted">
+                <i class="fa fa-folder-open fs-1 mb-3 d-block" style="opacity:.3;"></i>
+                <div class="fw-semibold">Nessun evento trovato.</div>
             </div>
-        </div>
+        <?php else: ?>
+        <div class="d-flex flex-column gap-3">
+        <?php foreach($eventi as $ev): ?>
+            <div class="ev-card d-flex">
+                <!-- Striscia colore sinistra -->
+                <div class="ev-card-accent" style="background:<?php echo $col_area; ?>;"></div>
 
-        <div class="card shadow-sm border-0">
-            <div class="card-body p-0">
-                <div class="table-responsive">
-                    <table class="table table-hover align-middle m-0">
-                        <thead class="table-dark"><tr><th>Info Evento</th><th>Gestione Turni</th><th class="text-end">Azione</th></tr></thead>
-                        <tbody>
-                            <?php if(empty($eventi)): ?>
-                                <tr><td colspan="3" class="text-center p-5 text-muted"><i class="fa fa-folder-open fs-2 mb-2 d-block"></i>Nessun evento trovato.</td></tr>
-                            <?php else: ?>
-                                <?php foreach($eventi as $ev): ?>
-                                    <tr>
-                                        <td style="width: 35%;">
-                                            <div class="fw-bold text-danger fs-6"><?php if($ev['is_evidenza']): ?><span class="badge bg-warning text-dark me-1">⭐</span><?php endif; ?><?php echo htmlspecialchars($ev['titolo'] ?? ''); ?></div>
-                                            <div class="small text-muted mb-1">📁 <?php echo $ev['nome_sottocategoria'] ? htmlspecialchars($ev['nome_sottocategoria']) : 'Nessuna Sezione'; ?> | 📍 <?php echo htmlspecialchars($ev['luogo'] ?? ''); ?></div>
-                                            <?php if($ev['richiede_prenotazione'] == 0): ?><span class="badge bg-success me-1 mb-1">🔓 Libero</span><?php endif; ?>
-                                            <?php if(!empty($ev['locandina_path'])): ?><span class="badge bg-info text-dark me-1 mb-1">🖼️ Locandina</span><?php endif; ?>
-                                            <?php if(!empty($ev['allegato_pdf'])): ?><span class="badge bg-secondary me-1 mb-1">📄 PDF</span><?php endif; ?>
-                                            <?php if(($ev['abilita_presenze'] ?? 1) == 1): ?><span class="badge bg-primary me-1 mb-1">✅ Check-in</span><?php endif; ?>
-
-                                            <div class="mt-2 d-flex flex-wrap gap-1">
-                                                <button type="button" class="btn btn-outline-primary btn-sm py-0" data-bs-toggle="modal" data-bs-target="#modEv<?php echo $ev['id']; ?>"><i class="fa fa-edit"></i> Modifica</button>
-                                                <?php if ($can_manage_settings): ?>
-                                                    <form method="POST" class="d-inline">
-                                                        <?php csrf_field(); ?>
-                                                        <input type="hidden" name="archivia_ev" value="<?php echo $ev['id']; ?>">
-                                                        <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                        <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
-                                                        <button type="submit" class="btn btn-outline-warning btn-sm py-0 text-dark" data-confirm="Archiviare questo evento?"><i class="fa fa-archive"></i></button>
-                                                    </form>
-                                                <?php endif; ?>
-                                            </div>
-                                        </td>
-
-                                        <td style="width: 55%;">
-                                            <form method="POST" class="bg-light p-2 rounded border mb-2">
-                                                <?php csrf_field(); ?>
-                                                <input type="hidden" name="evento_id" value="<?php echo $ev['id']; ?>">
-                                                <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
-                                                <div class="row g-1 align-items-center">
-                                                    <div class="col-md-2"><label class="small fw-bold text-muted d-block" style="font-size:0.75rem;">Data</label><input type="date" name="data_turno" class="form-control form-control-sm" required></div>
-                                                    <div class="col-md-2"><label class="small fw-bold text-muted d-block" style="font-size:0.75rem;">Inizio</label><input type="time" name="orario_inizio" class="form-control form-control-sm" required></div>
-                                                    <div class="col-md-2"><label class="small fw-bold text-muted d-block" style="font-size:0.75rem;">Fine</label><input type="time" name="orario_fine" class="form-control form-control-sm" required></div>
-                                                    <div class="col-md-2"><label class="small fw-bold text-muted d-block" style="font-size:0.75rem;">Posti</label><input type="number" name="max_posti" class="form-control form-control-sm" value="30" required></div>
-                                                    <div class="col-md-2"><label class="small fw-bold text-muted d-block" style="font-size:0.75rem;">Ap. Pren.</label><input type="datetime-local" name="data_apertura" class="form-control form-control-sm"></div>
-                                                    <div class="col-md-2"><label class="small fw-bold text-muted d-block" style="font-size:0.75rem;">Ch. Pren.</label><input type="datetime-local" name="data_chiusura" class="form-control form-control-sm"></div>
-                                                    <div class="col-12 mt-1">
-                                                        <div class="form-check form-switch d-inline-block me-3"><input class="form-check-input" type="checkbox" name="abilita_lista_attesa" id="waAdd<?php echo $ev['id']; ?>" value="1"><label class="form-check-label small fw-bold text-warning" for="waAdd<?php echo $ev['id']; ?>">Lista Attesa</label></div>
-                                                        <div class="form-check form-switch d-inline-block me-3"><input class="form-check-input" type="checkbox" name="abilita_multi_posto" id="mpAdd<?php echo $ev['id']; ?>" value="1"><label class="form-check-label small fw-bold text-info" for="mpAdd<?php echo $ev['id']; ?>">Multi-Posto</label></div>
-                                                        <div class="form-check form-switch d-inline-block"><input class="form-check-input" type="checkbox" name="richiede_approvazione" id="apprAdd<?php echo $ev['id']; ?>" value="1"><label class="form-check-label small fw-bold text-danger" for="apprAdd<?php echo $ev['id']; ?>">Approvazione</label></div>
-                                                        <button type="submit" name="add_turno" class="btn btn-success btn-sm fw-bold px-3 float-end">+ Aggiungi Turno</button>
-                                                    </div>
-                                                </div>
-                                            </form>
-
-                                            <?php foreach($ev['turni'] as $t): ?>
-    <div class="badge bg-light text-dark border p-2 me-1 mb-1 d-block text-start shadow-sm">
-        <div class="d-flex justify-content-between align-items-center flex-wrap gap-1">
-            <span>
-                <strong>📅 <?php echo date('d/m/Y', strtotime($t['data_turno'])); ?> | 🕒 <?php echo substr($t['orario_inizio'],0,5); ?>-<?php echo substr($t['orario_fine'],0,5); ?> (Posti: <?php echo $t['max_posti']; ?>)</strong>
-            </span>
-            
-            <!-- INIZIO BLOCCO SOSTITUITO CON IL TASTO QR -->
-            <div class="d-flex align-items-center gap-2">
-                <a href="stampa_qr_aula.php?t_id=<?php echo $t['id']; ?>&p_id=<?php echo $filtro_p; ?>" class="btn btn-outline-success btn-sm py-0 px-2 fw-bold" title="Stampa QR Code da appendere in Aula"><i class="fa fa-qrcode me-1"></i> QR Aula</a>
-                
-                <button type="button" class="btn btn-link btn-sm p-0 ms-1" data-bs-toggle="modal" data-bs-target="#modTurno<?php echo $t['id']; ?>"><i class="fa fa-edit text-primary"></i></button>
-                <form method="POST" class="d-inline">
-                    <?php csrf_field(); ?>
-                    <input type="hidden" name="del_turno" value="<?php echo $t['id']; ?>">
-                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                    <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
-                    <button type="submit" class="btn btn-link btn-sm p-0 ms-1 text-danger" data-confirm="Eliminare questo turno?" title="Elimina Turno">&times;</button>
-                </form>
-            </div>
-            <!-- FINE BLOCCO SOSTITUITO -->
-
-        </div>
-    </div>
-<?php endforeach; ?>
-                                        </td>
-
-                                        <td class="text-end">
-                                            <?php if ($can_manage_settings): ?>
-                                                <form method="POST" class="d-inline">
-                                                    <?php csrf_field(); ?>
-                                                    <input type="hidden" name="del_ev" value="<?php echo $ev['id']; ?>">
-                                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                    <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
-                                                    <button type="submit" class="btn btn-outline-danger btn-sm" data-confirm="Eliminare questo evento e tutti i suoi turni e prenotazioni?"><i class="fa fa-trash"></i> Elimina</button>
-                                                </form>
-                                            <?php endif; ?>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
+                <div class="flex-grow-1 p-3">
+                    <!-- ── HEADER EVENTO ── -->
+                    <div class="d-flex align-items-start justify-content-between gap-2 mb-2">
+                        <div>
+                            <?php if($ev['is_evidenza']): ?>
+                                <span class="badge bg-warning text-dark me-1" style="font-size:.65rem;">⭐ EVIDENZA</span>
                             <?php endif; ?>
-                        </tbody>
-                    </table>
+                            <span class="fw-bold fs-6 text-dark"><?php echo htmlspecialchars($ev['titolo'] ?? ''); ?></span>
+                            <div class="text-muted mt-1 d-flex flex-wrap gap-2" style="font-size:.8rem;">
+                                <span><i class="fa fa-folder me-1 text-secondary"></i><?php echo $ev['nome_sottocategoria'] ? htmlspecialchars($ev['nome_sottocategoria']) : 'Nessuna Sezione'; ?></span>
+                                <?php if(!empty($ev['luogo'])): ?>
+                                    <span><i class="fa fa-map-marker-alt me-1 text-secondary"></i><?php echo htmlspecialchars($ev['luogo']); ?></span>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        <!-- Bottoni azione -->
+                        <div class="d-flex gap-1 flex-shrink-0">
+                            <button type="button" class="btn btn-sm btn-outline-primary" style="border-radius:8px;width:34px;height:34px;padding:0;" data-bs-toggle="modal" data-bs-target="#modEv<?php echo $ev['id']; ?>" title="Modifica evento"><i class="fa fa-edit" style="font-size:.85rem;"></i></button>
+                            <?php if ($can_manage_settings): ?>
+                                <form method="POST" class="d-inline m-0">
+                                    <?php csrf_field(); ?>
+                                    <input type="hidden" name="archivia_ev" value="<?php echo $ev['id']; ?>">
+                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                    <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
+                                    <button type="submit" class="btn btn-sm btn-outline-warning text-dark" style="border-radius:8px;width:34px;height:34px;padding:0;" data-confirm="Archiviare questo evento?" title="Archivia"><i class="fa fa-archive" style="font-size:.85rem;"></i></button>
+                                </form>
+                                <form method="POST" class="d-inline m-0">
+                                    <?php csrf_field(); ?>
+                                    <input type="hidden" name="del_ev" value="<?php echo $ev['id']; ?>">
+                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                    <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger" style="border-radius:8px;width:34px;height:34px;padding:0;" data-confirm="Eliminare questo evento e tutti i suoi turni e prenotazioni?" title="Elimina"><i class="fa fa-trash" style="font-size:.85rem;"></i></button>
+                                </form>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+
+                    <!-- Badge features -->
+                    <div class="d-flex flex-wrap gap-1 mb-3">
+                        <?php if($ev['richiede_prenotazione'] == 0): ?>
+                            <span class="badge" style="background:#dcfce7;color:#166534;font-size:.68rem;">Accesso Libero</span>
+                        <?php else: ?>
+                            <span class="badge" style="background:#dbeafe;color:#1e40af;font-size:.68rem;">Prenotabile</span>
+                        <?php endif; ?>
+                        <?php if(($ev['abilita_presenze'] ?? 1) == 1): ?>
+                            <span class="badge" style="background:#ede9fe;color:#5b21b6;font-size:.68rem;"><i class="fa fa-qrcode me-1"></i>Check-in</span>
+                        <?php endif; ?>
+                        <?php if(!empty($ev['locandina_path'])): ?>
+                            <span class="badge" style="background:#fef9c3;color:#854d0e;font-size:.68rem;"><i class="fa fa-image me-1"></i>Locandina</span>
+                        <?php endif; ?>
+                        <?php if(!empty($ev['allegato_pdf'])): ?>
+                            <span class="badge" style="background:#f1f5f9;color:#475569;font-size:.68rem;"><i class="fa fa-file-pdf me-1"></i>PDF</span>
+                        <?php endif; ?>
+                    </div>
+
+                    <!-- ── TURNI ESISTENTI ── -->
+                    <?php if(!empty($ev['turni'])): ?>
+                    <div class="d-flex flex-column gap-2 mb-3">
+                        <?php foreach($ev['turni'] as $t):
+                            $t_passato = turno_concluso($t);
+                        ?>
+                        <div class="turno-chip <?php echo $t_passato ? 'opacity-50' : ''; ?>">
+                            <div class="d-flex align-items-center gap-3 flex-wrap">
+                                <?php if (!empty($t['nome_turno'])): ?>
+                                    <span class="fw-bold text-dark" style="font-size:.85rem;"><i class="fa fa-tag me-1 text-secondary"></i><?php echo htmlspecialchars($t['nome_turno']); ?></span>
+                                <?php endif; ?>
+                                <?php if (!empty($t['data_turno'])): ?>
+                                    <span class="fw-bold" style="color:<?php echo $col_area; ?>;font-size:.85rem;">
+                                        <i class="fa fa-calendar me-1"></i><?php echo date('d/m/Y', strtotime($t['data_turno'])); ?>
+                                    </span>
+                                <?php endif; ?>
+                                <?php if (orario_turno($t) !== ''): ?>
+                                    <span class="text-dark" style="font-size:.82rem;">
+                                        <i class="fa fa-clock text-secondary me-1"></i><?php echo orario_turno($t); ?>
+                                    </span>
+                                <?php endif; ?>
+                                <span class="badge" style="background:#f1f5f9;color:#334155;font-size:.72rem;font-weight:600;">
+                                    <i class="fa fa-users me-1"></i><?php echo $t['max_posti']; ?> posti
+                                </span>
+                                <?php if($t['abilita_lista_attesa']): ?><span class="badge" style="background:#fef3c7;color:#92400e;font-size:.68rem;">L. Attesa</span><?php endif; ?>
+                                <?php if($t['abilita_multi_posto']): ?><span class="badge" style="background:#e0f2fe;color:#0c4a6e;font-size:.68rem;">Multi-Posto</span><?php endif; ?>
+                                <?php if($t['richiede_approvazione']): ?><span class="badge" style="background:#fee2e2;color:#991b1b;font-size:.68rem;">Approvazione</span><?php endif; ?>
+                            </div>
+                            <div class="d-flex align-items-center gap-1 flex-shrink-0">
+                                <a href="stampa_qr_aula.php?t_id=<?php echo $t['id']; ?>&p_id=<?php echo $filtro_p; ?>" class="btn btn-sm btn-outline-success py-0 px-2 fw-bold" style="border-radius:6px;font-size:.75rem;" title="QR Aula"><i class="fa fa-qrcode me-1"></i>QR Aula</a>
+                                <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2" style="border-radius:6px;" data-bs-toggle="modal" data-bs-target="#modTurno<?php echo $t['id']; ?>" title="Modifica turno"><i class="fa fa-edit"></i></button>
+                                <form method="POST" class="d-inline m-0">
+                                    <?php csrf_field(); ?>
+                                    <input type="hidden" name="del_turno" value="<?php echo $t['id']; ?>">
+                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                    <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger py-0 px-2" style="border-radius:6px;" data-confirm="Eliminare questo turno?" title="Elimina turno"><i class="fa fa-times"></i></button>
+                                </form>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php endif; ?>
+
+                    <!-- ── AGGIUNGI TURNO (collassabile) ── -->
+                    <div>
+                        <button class="add-turno-toggle" type="button" data-bs-toggle="collapse" data-bs-target="#addTurno<?php echo $ev['id']; ?>">
+                            <i class="fa fa-plus me-1"></i> Aggiungi Turno
+                        </button>
+                        <div class="collapse mt-2" id="addTurno<?php echo $ev['id']; ?>">
+                            <form method="POST" class="p-3 rounded" style="background:#f8fafc;border:1px solid #e2e8f0;">
+                                <?php csrf_field(); ?>
+                                <input type="hidden" name="evento_id" value="<?php echo $ev['id']; ?>">
+                                <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
+                                <div class="row g-2 align-items-end mb-2">
+                                    <div class="col-12 col-md-3">
+                                        <label class="form-label small fw-bold mb-1">Nome turno</label>
+                                        <input type="text" name="nome_turno" class="form-control form-control-sm" placeholder="Es. Gruppo 1" maxlength="150">
+                                    </div>
+                                    <div class="col-6 col-md-2">
+                                        <label class="form-label small fw-bold mb-1">Data</label>
+                                        <input type="date" name="data_turno" class="form-control form-control-sm">
+                                    </div>
+                                    <div class="col-3 col-md-1">
+                                        <label class="form-label small fw-bold mb-1">Inizio</label>
+                                        <input type="time" name="orario_inizio" class="form-control form-control-sm">
+                                    </div>
+                                    <div class="col-3 col-md-1">
+                                        <label class="form-label small fw-bold mb-1">Fine</label>
+                                        <input type="time" name="orario_fine" class="form-control form-control-sm">
+                                    </div>
+                                    <div class="col-4 col-md-1">
+                                        <label class="form-label small fw-bold mb-1">Posti</label>
+                                        <input type="number" name="max_posti" class="form-control form-control-sm" value="30" required>
+                                    </div>
+                                    <div class="col-4 col-md-2">
+                                        <label class="form-label small fw-bold mb-1">Ap. Pren.</label>
+                                        <input type="datetime-local" name="data_apertura" class="form-control form-control-sm">
+                                    </div>
+                                    <div class="col-4 col-md-2">
+                                        <label class="form-label small fw-bold mb-1">Ch. Pren.</label>
+                                        <input type="datetime-local" name="data_chiusura" class="form-control form-control-sm">
+                                    </div>
+                                    <div class="col-12"><small class="text-muted">Compila almeno il nome oppure la data. Orari facoltativi.</small></div>
+                                </div>
+                                <div class="d-flex align-items-center flex-wrap gap-3 justify-content-between">
+                                    <div class="d-flex gap-3 flex-wrap">
+                                        <div class="form-check form-switch m-0"><input class="form-check-input" type="checkbox" name="abilita_lista_attesa" id="waAdd<?php echo $ev['id']; ?>" value="1"><label class="form-check-label small fw-bold text-warning" for="waAdd<?php echo $ev['id']; ?>">Lista Attesa</label></div>
+                                        <div class="form-check form-switch m-0"><input class="form-check-input" type="checkbox" name="abilita_multi_posto" id="mpAdd<?php echo $ev['id']; ?>" value="1"><label class="form-check-label small fw-bold text-info" for="mpAdd<?php echo $ev['id']; ?>">Multi-Posto</label></div>
+                                        <div class="form-check form-switch m-0"><input class="form-check-input" type="checkbox" name="richiede_approvazione" id="apprAdd<?php echo $ev['id']; ?>" value="1"><label class="form-check-label small fw-bold text-danger" for="apprAdd<?php echo $ev['id']; ?>">Approvazione</label></div>
+                                    </div>
+                                    <button type="submit" name="add_turno" class="btn btn-success btn-sm fw-bold px-4" style="border-radius:7px;"><i class="fa fa-plus me-1"></i>Salva Turno</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+
                 </div>
             </div>
+        <?php endforeach; ?>
         </div>
+        <?php endif; ?>
     </div>
 </div>
 
@@ -454,12 +551,14 @@ if ($res_ev) {
 
                     <div class="row bg-white p-3 rounded border border-warning shadow-sm">
                         <h6 class="fw-bold text-warning border-bottom pb-2 mb-3" style="color:#b37700!important;">Configurazione Primo Turno (Opzionale)</h6>
+                        <div class="col-md-3 mb-2"><label class="form-label small fw-bold">Nome Turno</label><input type="text" name="nome_turno" class="form-control form-control-sm" placeholder="Es. Gruppo 1" maxlength="150"></div>
                         <div class="col-md-2 mb-2"><label class="form-label small fw-bold">Data Turno</label><input type="date" name="data_turno" class="form-control form-control-sm"></div>
-                        <div class="col-md-2 mb-2"><label class="form-label small fw-bold">Ora Inizio</label><input type="time" name="orario_inizio" class="form-control form-control-sm"></div>
-                        <div class="col-md-2 mb-2"><label class="form-label small fw-bold">Ora Fine</label><input type="time" name="orario_fine" class="form-control form-control-sm"></div>
-                        <div class="col-md-2 mb-2"><label class="form-label small fw-bold">Capienza</label><input type="number" name="max_posti" class="form-control form-control-sm" value="30"></div>
+                        <div class="col-md-1 mb-2"><label class="form-label small fw-bold">Inizio</label><input type="time" name="orario_inizio" class="form-control form-control-sm"></div>
+                        <div class="col-md-1 mb-2"><label class="form-label small fw-bold">Fine</label><input type="time" name="orario_fine" class="form-control form-control-sm"></div>
+                        <div class="col-md-1 mb-2"><label class="form-label small fw-bold">Capienza</label><input type="number" name="max_posti" class="form-control form-control-sm" value="30"></div>
                         <div class="col-md-2 mb-2"><label class="form-label small fw-bold">Ap. Prenotazioni</label><input type="datetime-local" name="data_apertura" class="form-control form-control-sm"></div>
                         <div class="col-md-2 mb-2"><label class="form-label small fw-bold">Ch. Prenotazioni</label><input type="datetime-local" name="data_chiusura" class="form-control form-control-sm"></div>
+                        <div class="col-12"><small class="text-muted">Il turno viene creato se compili il nome oppure la data.</small></div>
                     </div>
                 </div>
                 <div class="modal-footer py-2 bg-white">
@@ -557,9 +656,11 @@ if ($res_ev) {
                         <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
                         <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
                         
-                        <div class="col-12"><label class="small fw-bold">Data Turno</label><input type="date" name="data_turno" class="form-control form-control-sm" value="<?php echo $t['data_turno']; ?>" required></div>
-                        <div class="col-6"><label class="small fw-bold">Ora Inizio</label><input type="time" name="orario_inizio" class="form-control form-control-sm" value="<?php echo $t['orario_inizio']; ?>" required></div>
-                        <div class="col-6"><label class="small fw-bold">Ora Fine</label><input type="time" name="orario_fine" class="form-control form-control-sm" value="<?php echo $t['orario_fine']; ?>" required></div>
+                        <div class="col-12"><label class="small fw-bold">Nome Turno</label><input type="text" name="nome_turno" class="form-control form-control-sm" value="<?php echo htmlspecialchars($t['nome_turno'] ?? ''); ?>" placeholder="Es. Gruppo 1" maxlength="150"></div>
+                        <div class="col-12"><label class="small fw-bold">Data Turno</label><input type="date" name="data_turno" class="form-control form-control-sm" value="<?php echo htmlspecialchars($t['data_turno'] ?? ''); ?>"></div>
+                        <div class="col-6"><label class="small fw-bold">Ora Inizio</label><input type="time" name="orario_inizio" class="form-control form-control-sm" value="<?php echo htmlspecialchars($t['orario_inizio'] ?? ''); ?>"></div>
+                        <div class="col-6"><label class="small fw-bold">Ora Fine</label><input type="time" name="orario_fine" class="form-control form-control-sm" value="<?php echo htmlspecialchars($t['orario_fine'] ?? ''); ?>"></div>
+                        <div class="col-12"><small class="text-muted">Almeno il nome oppure la data.</small></div>
                         <div class="col-12"><label class="small fw-bold">Capienza Posti</label><input type="number" name="max_posti" class="form-control form-control-sm" value="<?php echo $t['max_posti']; ?>" required></div>
                         
                         <div class="col-12 mt-3"><label class="small fw-bold text-primary">Ap. Prenotazioni</label><input type="datetime-local" name="data_apertura" class="form-control form-control-sm" value="<?php echo !empty($t['data_apertura']) ? date('Y-m-d\TH:i', strtotime($t['data_apertura'])) : ''; ?>"></div>

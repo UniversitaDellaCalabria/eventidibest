@@ -47,7 +47,7 @@ $sql = "SELECT p.id, p.nome, p.cognome, p.email, p.codice_prenotazione,
         WHERE p.stato = 'confermata' 
           AND p.presente = 1 
           AND p.attestato_inviato = 0 
-          AND CONCAT(t.data_turno, ' ', t.orario_fine) <= '$now'";
+          AND (t.data_turno IS NULL OR CONCAT(t.data_turno, ' ', COALESCE(t.orario_fine, '23:59:59')) <= '$now')";
 
 $res = $conn->query($sql);
 
@@ -60,7 +60,7 @@ if ($res && $res->num_rows > 0) {
         $link_area = $domain . "/area_personale.php";
         
         $corpo = "<p>Gentile <strong>{$row['nome']} {$row['cognome']}</strong>,</p>";
-        $corpo .= "<p>Grazie per aver partecipato all'evento <strong>" . htmlspecialchars($row['titolo']) . "</strong> del " . date('d/m/Y', strtotime($row['data_turno'])) . ".</p>";
+        $corpo .= "<p>Grazie per aver partecipato all'evento <strong>" . htmlspecialchars($row['titolo']) . "</strong>" . (!empty($row['data_turno']) ? " del " . date('d/m/Y', strtotime($row['data_turno'])) : "") . ".</p>";
         $corpo .= "<p>Il tuo <strong>Attestato di Partecipazione</strong> è stato generato ed è ora disponibile per il download.</p>";
         $corpo .= "<p style='text-align: center; margin: 30px 0;'>
                     <a href='$link_attestato' style='background-color: #198754; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;'>📄 Scarica il tuo Attestato</a>

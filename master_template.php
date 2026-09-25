@@ -90,8 +90,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
         $apertura_ok = empty($t_info['data_apertura']) || ($now >= $t_info['data_apertura']);
         $chiusura_ok = empty($t_info['data_chiusura']) || ($now <= $t_info['data_chiusura']);
 
-        if (!$apertura_ok) { header("Location: {$current_filename}.php?status=notopened"); exit; } 
-        elseif (!$chiusura_ok) { header("Location: {$current_filename}.php?status=closed"); exit; } 
+        if (!$apertura_ok) { header("Location: {$current_filename}.php?status=notopened"); exit; }
+        elseif (!$chiusura_ok) { header("Location: {$current_filename}.php?status=closed"); exit; }
+
+        $limite_isc = $page_cfg['limite_iscrizioni'] ?? 'nessuno';
+        if ($limite_isc !== 'nessuno') {
+            // Lock per persona+area fino a fine inserimento: due invii simultanei (doppio clic,
+            // due schede, turni diversi) non possono superare entrambi il controllo.
+            // Il lock FOR UPDATE sotto copre solo il singolo turno. Rilasciato a fine script.
+            $lock_iscr = 'dibest_iscr_' . (int)$t_info['pagina_id'] . '_' . md5($email);
+            $stmt_lk = $conn->prepare("SELECT GET_LOCK(?, 10)");
+            $stmt_lk->bind_param("s", $lock_iscr); $stmt_lk->execute();
+            if ((int)($stmt_lk->get_result()->fetch_row()[0] ?? 0) !== 1) { header("Location: {$current_filename}.php?status=error"); exit; }
+
+            $blocco = trova_iscrizione_vincolata($conn, $limite_isc, (int)$t_info['pagina_id'], (int)$t_info['evento_id'], (int)($u_id_bind ?? 0), $email, $matricola);
+            if ($blocco) {
+                header("Location: {$current_filename}.php?status=limite&ev=" . urlencode($blocco['evento_titolo'])); exit;
+            }
+        }
 
         $sigla = strtoupper(substr($current_filename, 0, 2));
         $codice_p = $sigla . '-' . strtoupper(substr(md5(uniqid(rand(), true)), 0, 8));
@@ -170,12 +186,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
             error_log("[Prenotazione][turno_id=$turno_id] Transazione fallita: " . $e->getMessage());
             header("Location: {$current_filename}.php?status=error"); exit;
         }
+        // Posto confermato: le altre liste d'attesa della persona nell'ambito del limite decadono
+        if ($insert_ok && $stato_prenotazione === 'confermata') { decadi_attese_vincolate($conn, (int)$stmt_ins->insert_id); }
+        if (isset($lock_iscr)) { $conn->query("SELECT RELEASE_LOCK('" . $conn->real_escape_string($lock_iscr) . "')"); }
         // ================= FINE SEZIONE CRITICA =================
         // Da qui in poi: email/notifiche, FUORI dalla transazione (non tengono bloccata la riga).
         
         if ($insert_ok) {
-            $data_formatted = date('d/m/Y', strtotime($t_info['data_turno']));
-            $ora_formatted = substr($t_info['orario_inizio'], 0, 5) . ' - ' . substr($t_info['orario_fine'], 0, 5);
+            $data_formatted = implode(' · ', array_filter([$t_info['nome_turno'] ?? '', !empty($t_info['data_turno']) ? date('d/m/Y', strtotime($t_info['data_turno'])) : '']));
+            $ora_formatted = orario_turno($t_info) ?: 'da definire';
             $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
             $domain = $_SERVER['HTTP_HOST'] ?? 'localhost';
             $base_dir = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
@@ -183,7 +202,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
             $btn_ricevuta_html = "<p style='margin-top:15px;'><a href='$link_ricevuta_url' target='_blank' style='background:#B30000; color:#ffffff; padding:10px 18px; text-decoration:none; border-radius:6px; font-weight:bold;'>📄 Scarica / Stampa Ricevuta PDF</a></p>";
             $gcal_link = getGoogleCalendarUrl($t_info['evento_titolo'], $t_info['data_turno'], $t_info['orario_inizio'], $t_info['orario_fine'], $t_info['luogo'], "Prenotazione $codice_p ($num_posti posti)");
             $ics_link = $proto . $domain . $base_dir . "/genera_ics.php?t_id=" . $t_info['id'];
-            $cal_html_buttons = "<p style='margin-top:15px;'><a href='$gcal_link' target='_blank' style='background:#4285F4; color:#fff; padding:8px 14px; text-decoration:none; border-radius:4px; font-weight:bold;'>📅 Aggiungi a Google Calendar</a> <a href='$ics_link' style='background:#334155; color:#fff; padding:8px 14px; text-decoration:none; border-radius:4px; font-weight:bold;'>📥 Scarica File .ics</a></p>";
+            $cal_html_buttons = empty($t_info['data_turno']) ? '' : "<p style='margin-top:15px;'><a href='$gcal_link' target='_blank' style='background:#4285F4; color:#fff; padding:8px 14px; text-decoration:none; border-radius:4px; font-weight:bold;'>📅 Aggiungi a Google Calendar</a> <a href='$ics_link' style='background:#334155; color:#fff; padding:8px 14px; text-decoration:none; border-radius:4px; font-weight:bold;'>📥 Scarica File .ics</a></p>";
             $r_find = ['{NOME}', '{COGNOME}', '{MATRICOLA}', '{TITOLO_EVENTO}', '{DATA_TURNO}', '{ORARIO_TURNO}', '{LUOGO}', '{CODICE_PRENOTAZIONE}', '{LINK_RICEVUTA}'];
             $r_repl = [$nome, $cognome, $matricola, $t_info['evento_titolo'], $data_formatted, $ora_formatted, $t_info['luogo'], $codice_p, $btn_ricevuta_html];
             $sys_email = $conn->query("SELECT * FROM impostazioni_sistema WHERE id = 1")->fetch_assoc();
@@ -201,18 +220,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
             
             inviaNotificaEmail($email, str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn);
 
-            $res_p_gest = $conn->query("SELECT gestore_utente_id, gestori_utenti_ids FROM pagine_eventi WHERE id = {$t_info['pagina_id']} LIMIT 1");
-            if ($res_p_gest && $row_p_gest = $res_p_gest->fetch_assoc()) {
-                $ids_gest = array_filter(explode(',', $row_p_gest['gestori_utenti_ids'] ?? ''));
-                if ((int)$row_p_gest['gestore_utente_id'] > 0) { $ids_gest[] = (int)$row_p_gest['gestore_utente_id']; }
-                if (!empty($ids_gest)) {
-                    $res_u_gest = $conn->query("SELECT email FROM utenti WHERE id IN (".implode(',', array_unique(array_map('intval', $ids_gest))).") AND email IS NOT NULL AND email != ''");
-                    if ($res_u_gest && $res_u_gest->num_rows > 0) {
-                        $obj_gest = "Nuova Registrazione ($num_posti posti): " . $t_info['evento_titolo'];
-                        $body_gest = "<p>È stata registrata una nuova prenotazione per l'evento <strong>" . htmlspecialchars($t_info['evento_titolo']) . "</strong>.</p><p>👤 " . htmlspecialchars($nome . ' ' . $cognome) . "<br>📧 " . htmlspecialchars($email) . "</p>";
-                        while ($u_gest = $res_u_gest->fetch_assoc()) { inviaNotificaEmail($u_gest['email'], $obj_gest, $body_gest, $conn); }
-                    }
-                }
+            // Gestori dell'area + del singolo evento (anche quelli assegnati da Abilitazioni), se hanno le notifiche attive
+            $email_gestori = get_email_gestori_evento($conn, (int)$t_info['evento_id']);
+            if (!empty($email_gestori)) {
+                $stati_label = ['confermata' => 'Confermata', 'in_attesa' => "In lista d'attesa", 'da_approvare' => 'Da approvare'];
+                $obj_gest = "Nuova Registrazione ($num_posti posti): " . $t_info['evento_titolo'];
+                $body_gest = "<p>È stata registrata una nuova prenotazione per l'evento <strong>" . htmlspecialchars($t_info['evento_titolo']) . "</strong>.</p>"
+                           . "<p>👤 " . htmlspecialchars($nome . ' ' . $cognome) . "<br>📧 " . htmlspecialchars($email)
+                           . "<br>📅 " . htmlspecialchars($data_formatted ?: '-') . " | 🕒 " . htmlspecialchars($ora_formatted)
+                           . "<br>🎟️ " . htmlspecialchars($codice_p) . " — <strong>" . ($stati_label[$stato_prenotazione] ?? $stato_prenotazione) . "</strong></p>";
+                foreach ($email_gestori as $em_gest) { inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn); }
             }
 
             $param_stato = ($stato_prenotazione === 'in_attesa') ? "&st_tipo=attesa" : (($stato_prenotazione === 'da_approvare') ? "&st_tipo=approvare" : "");
@@ -238,6 +255,11 @@ if (isset($_GET['status'])) {
     elseif ($st === 'full') { $messaggio_prenotazione = "<div class='alert alert-danger fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-danger'><i class='fa fa-exclamation-circle me-2'></i> Posti esauriti per questo turno.</div>"; } 
     elseif ($st === 'closed') { $messaggio_prenotazione = "<div class='alert alert-danger fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-danger'><i class='fa fa-times-circle me-2'></i> Le prenotazioni sono chiuse.</div>"; } 
     elseif ($st === 'notopened') { $messaggio_prenotazione = "<div class='alert alert-warning fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-warning'><i class='fa fa-clock me-2'></i> Le prenotazioni non sono ancora aperte.</div>"; } 
+    elseif ($st === 'limite') {
+        $ev_bloc = htmlspecialchars($_GET['ev'] ?? '');
+        $regola = (($page_cfg['limite_iscrizioni'] ?? '') === 'un_turno') ? "In quest'area puoi prenotare un solo turno per ciascun evento." : "In quest'area puoi iscriverti a un solo evento/gruppo.";
+        $messaggio_prenotazione = "<div class='alert alert-warning fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-warning'><i class='fa fa-user-lock me-2'></i> $regola Risulti già iscritto a: <strong>$ev_bloc</strong>. Per cambiare, annulla prima la prenotazione dall'Area Personale.</div>";
+    }
     elseif ($st === 'error') { $messaggio_prenotazione = "<div class='alert alert-danger fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-danger'>Errore di registrazione. Compilare tutti i campi obbligatori.</div>"; }
 }
 
@@ -265,15 +287,16 @@ $evento_evidenza = null;
 $all_turni_flat = []; 
 $eventi_per_data = []; 
 $json_events_calendar = []; 
-$sezioni_superiori = []; 
+$sezioni_superiori = [];
 $eventi_macro = [];
+$eventi_per_categoria = [];
 
 $sql_ev = "SELECT e.*, sc.nome as nome_sottocategoria FROM eventi e LEFT JOIN sottocategorie sc ON e.sottocategoria_id = sc.id WHERE e.pagina_id = $p_id AND e.archiviato = 0 ORDER BY e.is_evidenza DESC, sc.ordine ASC, e.ordine ASC, e.id DESC";
 $res_ev = $conn->query($sql_ev);
 if ($res_ev) {
     while ($ev = $res_ev->fetch_assoc()) {
         $turni = [];
-        $res_t = $conn->query("SELECT * FROM turni WHERE evento_id = {$ev['id']} ORDER BY data_turno ASC, orario_inizio ASC");
+        $res_t = $conn->query("SELECT * FROM turni WHERE evento_id = {$ev['id']} ORDER BY (data_turno IS NULL), data_turno ASC, orario_inizio ASC, nome_turno ASC, id ASC");
         while ($t = $res_t->fetch_assoc()) {
             $turni[] = $t;
             
@@ -290,21 +313,23 @@ if ($res_ev) {
             $t_flat['is_evidenza'] = $ev['is_evidenza'];
             $all_turni_flat[] = $t_flat;
 
-            // Popolamento Eventi per FullCalendar
-            $start_dt = $t['data_turno'] . 'T' . $t['orario_inizio'];
-            $end_dt = $t['data_turno'] . 'T' . $t['orario_fine'];
-            $json_events_calendar[] = [
-                'id' => 'turno_' . $t['id'],
-                'title' => htmlspecialchars_decode($ev['titolo']),
-                'start' => $start_dt,
-                'end' => $end_dt,
-                'color' => $col_primaria,
-                'extendedProps' => ['turno_id' => $t['id'], 'luogo' => htmlspecialchars_decode($ev['luogo'])]
-            ];
+            // Popolamento Eventi per FullCalendar (solo turni con data)
+            if (!empty($t['data_turno'])) {
+                $json_events_calendar[] = [
+                    'id' => 'turno_' . $t['id'],
+                    'title' => htmlspecialchars_decode($ev['titolo']) . (!empty($t['nome_turno']) ? ' – ' . $t['nome_turno'] : ''),
+                    'start' => $t['data_turno'] . (!empty($t['orario_inizio']) ? 'T' . $t['orario_inizio'] : ''),
+                    'end' => !empty($t['orario_fine']) ? $t['data_turno'] . 'T' . $t['orario_fine'] : null,
+                    'allDay' => empty($t['orario_inizio']),
+                    'color' => $col_primaria,
+                    'extendedProps' => ['turno_id' => $t['id'], 'luogo' => htmlspecialchars_decode($ev['luogo'])]
+                ];
+            }
         }
         $ev['turni'] = $turni;
-        
-        if ((int)$ev['is_evidenza'] === 1 && $evento_evidenza === null) { 
+        $eventi_per_categoria[$ev['nome_sottocategoria'] ?: 'Altri gruppi'][] = $ev;
+
+        if ((int)$ev['is_evidenza'] === 1 && $evento_evidenza === null) {
             $evento_evidenza = $ev; 
             continue; 
         }
@@ -331,9 +356,16 @@ if ($res_ev) {
 }
 ksort($eventi_per_data);
 
+// Discipline nell'ordine definito in admin, poi eventuali gruppi senza categoria
+$ordine_cat = array_flip($categorie_nomi);
+uksort($eventi_per_categoria, fn($a, $b) => ($ordine_cat[$a] ?? PHP_INT_MAX) <=> ($ordine_cat[$b] ?? PHP_INT_MAX));
+
+$limite_iscrizioni = $page_cfg['limite_iscrizioni'] ?? 'nessuno';
+$mie_iscrizioni = $utente_logged ? get_mie_iscrizioni_area($conn, $p_id, (int)$_SESSION['utente_id'], (string)$val_email) : [];
+
 usort($all_turni_flat, function($a, $b) {
-    $dateA = $a['data_turno'] . ' ' . $a['orario_inizio'];
-    $dateB = $b['data_turno'] . ' ' . $b['orario_inizio'];
+    $dateA = ($a['data_turno'] ?: '9999-12-31') . ' ' . $a['orario_inizio'] . ' ' . $a['nome_turno'];
+    $dateB = ($b['data_turno'] ?: '9999-12-31') . ' ' . $b['orario_inizio'] . ' ' . $b['nome_turno'];
     return strcmp($dateA, $dateB);
 });
 
@@ -388,7 +420,7 @@ if (!function_exists('renderCardUniversal')) {
 
         if ($req_prenotazione == 0) {
             $t0 = $ev['turni'][0] ?? null;
-            $ora_str = $t0 ? "Ore " . substr($t0['orario_inizio'], 0, 5) . " - " . substr($t0['orario_fine'], 0, 5) : "Orario da definire";
+            $ora_str = ($t0 && orario_turno($t0) !== '') ? "Ore " . orario_turno($t0) : "Orario da definire";
             echo '<div class="card-footer border-top-0 d-flex justify-content-between align-items-center p-3 flex-wrap gap-2" style="background-color: #f4fbf7 !important; border-top: 1px solid #e2e8f0 !important;">';
             echo '<div class="d-flex align-items-center gap-3 flex-wrap"><span class="fw-bold text-dark d-flex align-items-center gap-2" style="font-size: 0.9rem;"><i class="fa-regular fa-clock text-secondary"></i> <strong>'.$ora_str.'</strong></span><span class="border-start ps-3 fw-bold text-success d-flex align-items-center gap-1" style="font-size: 0.9rem; color: #198754 !important;">🔓 <strong>Ingresso Libero</strong></span></div>';
             echo '<div><button class="btn btn-danger btn-sm fw-bold px-3 py-2 shadow-sm" style="background-color: #b04242; border: none; border-radius: 6px; font-size: 0.85rem;" disabled>Senza Prenotazione</button></div>';
@@ -398,9 +430,7 @@ if (!function_exists('renderCardUniversal')) {
             // Badge disponibilità aggregata (calcolato prima del bottone)
             $posti_badge_disp = 0; $badge_has_waitlist = false; $badge_all_ended = true;
             foreach ($ev['turni'] as $_bt) {
-                $now_bt = date('Y-m-d H:i:s');
-                $dt_fine_bt = $_bt['data_turno'] . ' ' . (!empty($_bt['orario_fine']) ? substr($_bt['orario_fine'], 0, 8) : '23:59:59');
-                if ($now_bt <= $dt_fine_bt) {
+                if (!turno_concluso($_bt)) {
                     $badge_all_ended = false;
                     $_occ_bt = getPostiOccupati($conn, $_bt['id']);
                     $_disp_bt = $_bt['max_posti'] - $_occ_bt;
@@ -424,9 +454,7 @@ if (!function_exists('renderCardUniversal')) {
                 
                 $now = date('Y-m-d H:i:s');
                 
-                // CALCOLO EVENTO CONCLUSO
-                $datetime_fine = $t['data_turno'] . ' ' . (!empty($t['orario_fine']) ? substr($t['orario_fine'], 0, 8) : '23:59:59');
-                $evento_concluso = ($now > $datetime_fine);
+                $evento_concluso = turno_concluso($t);
 
                 $prenotazioni_aperte = true;
                 $msg_scadenza = "";
@@ -447,19 +475,23 @@ if (!function_exists('renderCardUniversal')) {
                     }
                 }
                 
-                $gcal_url = getGoogleCalendarUrl($ev['titolo'], $t['data_turno'], $t['orario_inizio'], $t['orario_fine'], $ev['luogo'], "Prenotazione " . $ev['titolo']);
+                $gcal_url = !empty($t['data_turno']) ? getGoogleCalendarUrl($ev['titolo'], $t['data_turno'], $t['orario_inizio'], $t['orario_fine'], $ev['luogo'], "Prenotazione " . $ev['titolo']) : '';
                 
                 echo '<div class="p-3 bg-white border rounded shadow-sm">';
                 if ($msg_scadenza) echo '<div style="background-color: '.$colore_bg.'; color: '.$colore_testo.'; padding: 4px 10px; border-radius: 4px; font-size: 0.78rem; font-weight: bold; margin-bottom: 12px; display: inline-block; border: 1px solid rgba(0,0,0,0.05);">⏳ '.$msg_scadenza.'</div>';
                 
                 echo '<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">';
-                echo '<div style="font-size: 0.95rem;"><strong>🕒 '.formattaDataItaliano($t['data_turno']).' ('.substr($t['orario_inizio'], 0, 5).' - '.substr($t['orario_fine'], 0, 5).')</strong>';
+                $lbl_parti = [];
+                if (!empty($t['nome_turno'])) $lbl_parti[] = htmlspecialchars($t['nome_turno']);
+                if (!empty($t['data_turno'])) $lbl_parti[] = formattaDataItaliano($t['data_turno']);
+                if (orario_turno($t) !== '') $lbl_parti[] = '(' . orario_turno($t) . ')';
+                echo '<div style="font-size: 0.95rem;"><strong>🕒 '.implode(' ', $lbl_parti).'</strong>';
                 if($is_waitlist) echo '<span class="badge bg-warning text-dark ms-2">Lista d\'Attesa Attiva</span>';
                 else echo '<span class="text-muted ms-2" style="font-size: 0.85rem;">👥 '.max(0, $disponibili).' posti liberi su '.$t['max_posti'].'</span>';
                 echo '</div>'; 
                 
                 echo '<div class="d-flex gap-1 align-items-center">';
-                echo '<div class="dropdown d-inline-block me-1"><button class="btn btn-outline-secondary btn-sm dropdown-toggle py-1 px-2" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Aggiungi al Calendario" style="font-size:0.8rem;">📅 <span class="d-none d-sm-inline">Calendario</span></button><ul class="dropdown-menu dropdown-menu-end shadow-sm p-1" style="font-size:0.85rem;"><li><a class="dropdown-item py-1" href="'.$gcal_url.'" target="_blank"><i class="fa-fab fa-google text-primary me-2"></i> Google Calendar</a></li><li><a class="dropdown-item py-1" href="genera_ics.php?t_id='.$t['id'].'"><i class="fa fa-calendar-alt text-dark me-2"></i> Outlook / Apple (.ics)</a></li></ul></div>';
+                if (!empty($t['data_turno'])) echo '<div class="dropdown d-inline-block me-1"><button class="btn btn-outline-secondary btn-sm dropdown-toggle py-1 px-2" type="button" data-bs-toggle="dropdown" aria-expanded="false" title="Aggiungi al Calendario" style="font-size:0.8rem;">📅 <span class="d-none d-sm-inline">Calendario</span></button><ul class="dropdown-menu dropdown-menu-end shadow-sm p-1" style="font-size:0.85rem;"><li><a class="dropdown-item py-1" href="'.$gcal_url.'" target="_blank"><i class="fa-fab fa-google text-primary me-2"></i> Google Calendar</a></li><li><a class="dropdown-item py-1" href="genera_ics.php?t_id='.$t['id'].'"><i class="fa fa-calendar-alt text-dark me-2"></i> Outlook / Apple (.ics)</a></li></ul></div>';
                 
                 if ($evento_concluso) { echo '<button class="btn btn-secondary btn-sm fw-bold py-1 px-3 shadow-sm" disabled style="background: #e2e8f0; color: #475569; border: 1px solid #cbd5e1;"><i class="fa fa-flag-checkered me-1"></i> Evento Concluso</button>'; }
                 elseif (!$prenotazioni_aperte) { echo '<button class="btn btn-secondary btn-sm fw-bold py-1 px-3 shadow-sm" disabled style="background: #e9ecef; color: #6c757d; border: 1px solid #ced4da;">Non Prenotabile</button>'; } 
@@ -501,8 +533,9 @@ function printModalPrenotazione($t, $col_primaria, $utente_logged, $val_nome, $v
                     <div class="modal-body text-start">
                         <div class="alert alert-light border shadow-sm mb-3">
                             <div class="d-flex align-items-center gap-2 mb-1">
-                                <span class="badge bg-dark">📅 <?php echo date('d/m/Y', strtotime($t['data_turno'])); ?></span>
-                                <span class="badge bg-secondary">🕒 <?php echo substr($t['orario_inizio'], 0, 5); ?> - <?php echo substr($t['orario_fine'], 0, 5); ?></span>
+                                <?php if (!empty($t['nome_turno'])): ?><span class="badge" style="background:<?php echo $col_primaria; ?>;">🏷️ <?php echo htmlspecialchars($t['nome_turno']); ?></span><?php endif; ?>
+                                <?php if (!empty($t['data_turno'])): ?><span class="badge bg-dark">📅 <?php echo date('d/m/Y', strtotime($t['data_turno'])); ?></span><?php endif; ?>
+                                <?php if (orario_turno($t) !== ''): ?><span class="badge bg-secondary">🕒 <?php echo orario_turno($t); ?></span><?php endif; ?>
                             </div>
                             <?php if(!empty($t['evento_luogo'])): ?><small class="text-muted fw-bold d-block"><i class="fa fa-map-marker-alt text-danger me-1"></i> <?php echo htmlspecialchars($t['evento_luogo']); ?></small><?php endif; ?>
                         </div>
@@ -527,57 +560,164 @@ function printModalPrenotazione($t, $col_primaria, $utente_logged, $val_nome, $v
                             <?php endif; ?>
                         </div>
 
-                        <!-- CAMPI CUSTOM A DUE A DUE -->
-                        <?php 
+                        <!-- CAMPI PERSONALIZZATI (con campi condizionali e nuovi tipi) -->
+                        <?php
+                            $campi_array = [];
                             $res_cf = $conn->query("SELECT * FROM campi_form WHERE (pagina_id = $p_id AND (evento_id IS NULL OR evento_id = 0)) OR evento_id = {$t['evento_id']} ORDER BY ordine ASC, id ASC");
-                            if ($res_cf && $res_cf->num_rows > 0):
+                            if ($res_cf) while ($cfr = $res_cf->fetch_assoc()) $campi_array[] = $cfr;
+                            // Mappa id→nome_campo per risoluzione condizioni
+                            $cf_id_to_name = [];
+                            foreach ($campi_array as $cfr) $cf_id_to_name[(int)$cfr['id']] = $cfr['nome_campo'];
+                            $has_conds = false;
+                            foreach ($campi_array as $cfr) { if (!empty($cfr['condizione_json'])) { $has_conds = true; break; } }
+                            if (!empty($campi_array)):
                         ?>
                             <div class="border-top pt-2 mt-2">
                                 <div class="fw-bold small text-primary mb-2"><i class="fa fa-list-check me-1"></i> Informazioni Aggiuntive:</div>
-                                <div class="row g-3">
-                                <?php while ($cf = $res_cf->fetch_assoc()): ?>
-                                    <?php 
-                                        $req_attr = $cf['obbligatorio'] ? 'required' : ''; $asterisk = $cf['obbligatorio'] ? ' <span class="text-danger">*</span>' : '';
-                                        $input_name = 'custom_' . htmlspecialchars($cf['nome_campo']); $type = $cf['tipo_campo'];
-                                        $opts = !empty($cf['opzioni_select']) ? array_map('trim', explode(',', $cf['opzioni_select'])) : [];
-                                    ?>
-                                    <div class="col-md-6 mb-1">
+                                <div class="row g-3" id="cfRow_<?php echo $t['id']; ?>">
+                                <?php foreach ($campi_array as $cf):
+                                    $type       = $cf['tipo_campo'];
+                                    $input_name = 'custom_' . $cf['nome_campo'];
+                                    $opts       = !empty($cf['opzioni_select']) ? array_map('trim', explode(',', $cf['opzioni_select'])) : [];
+                                    $wrap_id    = 'cfWrap_' . $t['id'] . '_' . $cf['id'];
+                                    $is_cond    = !empty($cf['condizione_json']);
+                                    $cond_attrs = '';
+                                    if ($is_cond) {
+                                        $cj = json_decode($cf['condizione_json'], true) ?: [];
+                                        $se_name = isset($cj['se_id']) ? ($cf_id_to_name[(int)$cj['se_id']] ?? '') : '';
+                                        $se_val  = $cj['se_val'] ?? '';
+                                        $cond_attrs = 'data-cond-name="' . htmlspecialchars($se_name) . '" data-cond-val="' . htmlspecialchars($se_val) . '"';
+                                    }
+                                    $req_attr  = ($cf['obbligatorio'] && !$is_cond) ? 'required' : '';
+                                    $req_data  = $cf['obbligatorio'] ? 'data-orig-req="1"' : '';
+                                    $asterisk  = ($cf['obbligatorio'] && !$is_cond) ? ' <span class="text-danger">*</span>' : '';
+                                    $col_size  = in_array($type, ['separator','textarea','checkboxes','radio']) ? 'col-12' : 'col-md-6';
+                                    $hide_init = $is_cond ? 'style="display:none;"' : '';
+                                ?>
+
+                                <?php if ($type === 'hidden'): ?>
+                                    <input type="hidden" name="<?php echo htmlspecialchars($input_name); ?>" value="<?php echo htmlspecialchars($opts[0] ?? ''); ?>">
+
+                                <?php elseif ($type === 'separator'): ?>
+                                    <div class="col-12" id="<?php echo $wrap_id; ?>" <?php echo $cond_attrs; ?> <?php echo $hide_init; ?>>
+                                        <hr class="my-1">
+                                        <?php if (!empty($cf['etichetta']) && $cf['etichetta'] !== '-'): ?>
+                                            <div class="fw-bold small text-uppercase text-secondary" style="letter-spacing:.05em;"><?php echo htmlspecialchars($cf['etichetta']); ?></div>
+                                        <?php endif; ?>
+                                    </div>
+
+                                <?php else: ?>
+                                    <div class="<?php echo $col_size; ?> mb-1" id="<?php echo $wrap_id; ?>" <?php echo $cond_attrs; ?> <?php echo $hide_init; ?>>
                                         <label class="form-label small fw-bold mb-1"><?php echo htmlspecialchars($cf['etichetta']) . $asterisk; ?></label>
+
                                         <?php if ($type === 'file'): ?>
-                                            <input type="file" name="<?php echo $input_name; ?>[]" class="form-control form-control-sm" multiple <?php echo $req_attr; ?>>
+                                            <input type="file" name="<?php echo htmlspecialchars($input_name); ?>[]" class="form-control form-control-sm" multiple <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+
                                         <?php elseif ($type === 'select'): ?>
-                                            <select name="<?php echo $input_name; ?>" class="form-select form-select-sm" <?php echo $req_attr; ?>>
+                                            <select name="<?php echo htmlspecialchars($input_name); ?>" class="form-select form-select-sm" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
                                                 <option value="">-- Seleziona --</option>
                                                 <?php foreach ($opts as $opt): ?><option value="<?php echo htmlspecialchars($opt); ?>"><?php echo htmlspecialchars($opt); ?></option><?php endforeach; ?>
                                             </select>
+
                                         <?php elseif ($type === 'radio'): ?>
                                             <div class="d-flex flex-wrap gap-2 mt-1">
                                                 <?php foreach ($opts as $idx => $opt): ?>
                                                     <div class="form-check form-check-inline m-0 me-2">
-                                                        <input class="form-check-input" type="radio" name="<?php echo $input_name; ?>" id="<?php echo $input_name . '_' . $idx; ?>" value="<?php echo htmlspecialchars($opt); ?>" <?php echo $req_attr; ?>>
-                                                        <label class="form-check-label small" for="<?php echo $input_name . '_' . $idx; ?>"><?php echo htmlspecialchars($opt); ?></label>
+                                                        <input class="form-check-input" type="radio" name="<?php echo htmlspecialchars($input_name); ?>" id="<?php echo $wrap_id . '_r' . $idx; ?>" value="<?php echo htmlspecialchars($opt); ?>" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                                        <label class="form-check-label small" for="<?php echo $wrap_id . '_r' . $idx; ?>"><?php echo htmlspecialchars($opt); ?></label>
                                                     </div>
                                                 <?php endforeach; ?>
                                             </div>
+
+                                        <?php elseif ($type === 'checkboxes'): ?>
+                                            <div class="d-flex flex-wrap gap-2 mt-1">
+                                                <?php foreach ($opts as $idx => $opt): ?>
+                                                    <div class="form-check form-check-inline m-0 me-2">
+                                                        <input class="form-check-input" type="checkbox" name="<?php echo htmlspecialchars($input_name); ?>[]" id="<?php echo $wrap_id . '_c' . $idx; ?>" value="<?php echo htmlspecialchars($opt); ?>">
+                                                        <label class="form-check-label small" for="<?php echo $wrap_id . '_c' . $idx; ?>"><?php echo htmlspecialchars($opt); ?></label>
+                                                    </div>
+                                                <?php endforeach; ?>
+                                            </div>
+
                                         <?php elseif ($type === 'checkbox'): ?>
                                             <div class="form-check mt-1">
-                                                <input class="form-check-input" type="checkbox" name="<?php echo $input_name; ?>" id="<?php echo $input_name; ?>" value="Accettato / Sì" <?php echo $req_attr; ?>>
-                                                <label class="form-check-label small" for="<?php echo $input_name; ?>"><?php echo htmlspecialchars($cf['etichetta']); ?></label>
+                                                <input class="form-check-input" type="checkbox" name="<?php echo htmlspecialchars($input_name); ?>" id="<?php echo $wrap_id; ?>_chk" value="Sì" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                                <label class="form-check-label small" for="<?php echo $wrap_id; ?>_chk"><?php echo htmlspecialchars($cf['etichetta']); ?></label>
                                             </div>
+
                                         <?php elseif ($type === 'textarea'): ?>
-                                            <textarea name="<?php echo $input_name; ?>" class="form-control form-control-sm" rows="2" <?php echo $req_attr; ?>></textarea>
+                                            <textarea name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" rows="2" <?php echo $req_attr; ?> <?php echo $req_data; ?>></textarea>
+
+                                        <?php elseif ($type === 'rating'): ?>
+                                            <div class="d-flex gap-1 mt-1">
+                                                <input type="hidden" name="<?php echo htmlspecialchars($input_name); ?>" id="<?php echo $wrap_id; ?>_rating" value="" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                                <?php $nstars = max(5, count($opts)); for ($s = 1; $s <= $nstars; $s++): ?>
+                                                    <button type="button" class="btn btn-sm btn-outline-warning px-2 py-1 star-btn"
+                                                        data-val="<?php echo $s; ?>"
+                                                        data-target="<?php echo $wrap_id; ?>_rating"
+                                                        style="font-size:1.2rem;line-height:1;"
+                                                        onclick="evSetRating(this)">☆</button>
+                                                <?php endfor; ?>
+                                            </div>
+
                                         <?php elseif ($type === 'date'): ?>
-                                            <input type="date" name="<?php echo $input_name; ?>" class="form-control form-control-sm" <?php echo $req_attr; ?>>
+                                            <input type="date" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
                                         <?php elseif ($type === 'number'): ?>
-                                            <input type="number" name="<?php echo $input_name; ?>" class="form-control form-control-sm" <?php echo $req_attr; ?>>
+                                            <input type="number" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                        <?php elseif ($type === 'email'): ?>
+                                            <input type="email" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" autocomplete="email" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                        <?php elseif ($type === 'tel'): ?>
+                                            <input type="tel" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" placeholder="+39 333 0000000" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                        <?php elseif ($type === 'url'): ?>
+                                            <input type="url" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" placeholder="https://" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                        <?php elseif ($type === 'time'): ?>
+                                            <input type="time" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
                                         <?php else: ?>
-                                            <input type="text" name="<?php echo $input_name; ?>" class="form-control form-control-sm" <?php echo $req_attr; ?>>
+                                            <input type="text" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
                                         <?php endif; ?>
                                     </div>
-                                <?php endwhile; ?>
+                                <?php endif; ?>
+                                <?php endforeach; ?>
                                 </div>
                             </div>
+
+                        <?php if ($has_conds): ?>
+                        <script>
+                        (function() {
+                            var row = document.getElementById('cfRow_<?php echo $t['id']; ?>');
+                            if (!row) return;
+                            function getVal(name) {
+                                var inputs = row.querySelectorAll('[name="custom_' + name + '"]');
+                                if (!inputs.length) return '';
+                                var first = inputs[0];
+                                if (first.type === 'radio') {
+                                    var chk = row.querySelector('[name="custom_' + name + '"]:checked');
+                                    return chk ? chk.value.trim() : '';
+                                }
+                                if (first.type === 'checkbox') return first.checked ? first.value.trim() : '';
+                                if (first.tagName === 'SELECT') return first.value.trim();
+                                return first.value.trim();
+                            }
+                            function aggiorna() {
+                                row.querySelectorAll('[data-cond-name]').forEach(function(wrap) {
+                                    var trigName = wrap.dataset.condName;
+                                    var trigVal  = wrap.dataset.condVal.trim().toLowerCase();
+                                    var curVal   = getVal(trigName).toLowerCase();
+                                    var show     = (curVal === trigVal);
+                                    wrap.style.display = show ? '' : 'none';
+                                    wrap.querySelectorAll('input,select,textarea').forEach(function(inp) {
+                                        if (show && inp.dataset.origReq === '1') inp.required = true;
+                                        else { inp.required = false; if (!show) inp.value = ''; }
+                                    });
+                                });
+                            }
+                            row.addEventListener('change', aggiorna);
+                            row.addEventListener('input', aggiorna);
+                        })();
+                        </script>
                         <?php endif; ?>
+
+                        <?php endif; // end !empty($campi_array) ?>
                         
                         <!-- CHECKBOX PRIVACY OBBLIGATORIO -->
                         <div class="form-check mt-3 mb-1 p-3 bg-light rounded border border-secondary shadow-sm">
@@ -621,9 +761,8 @@ function getPulsanteAzione($t, $col_primaria, $utente_logged, $utente_ruolo_id, 
     $is_waitlist = ($soldout && isset($t['abilita_lista_attesa']) && $t['abilita_lista_attesa'] == 1);
     
     $now = date('Y-m-d H:i:s');
-    $datetime_fine = $t['data_turno'] . ' ' . (!empty($t['orario_fine']) ? substr($t['orario_fine'], 0, 8) : '23:59:59');
-    
-    if ($now > $datetime_fine) {
+
+    if (turno_concluso($t)) {
         return '<button class="btn btn-secondary btn-sm fw-bold py-1 px-3 shadow-sm" disabled><i class="fa fa-flag-checkered me-1"></i> Evento Concluso</button>';
     }
 
@@ -658,10 +797,25 @@ require_once 'header.php';
     .sidebar-sticky-fix {
         position: -webkit-sticky !important;
         position: sticky !important;
-        top: 110px !important; /* Calcolato per non sovrapporsi con l'header fisso AGID */
+        top: 110px !important;
         z-index: 1020;
     }
+    .star-btn { transition: color .1s; }
+    .star-btn.active, .star-btn:hover, .star-btn.hover { color: #f59e0b !important; border-color: #f59e0b !important; }
+    .star-btn.active::before { content: '★'; position:absolute; }
 </style>
+<script>
+function evSetRating(btn) {
+    var targetId = btn.dataset.target;
+    var val = btn.dataset.val;
+    var container = btn.parentElement;
+    container.querySelectorAll('.star-btn').forEach(function(b) {
+        b.textContent = parseInt(b.dataset.val) <= parseInt(val) ? '★' : '☆';
+        b.classList.toggle('active', parseInt(b.dataset.val) <= parseInt(val));
+    });
+    document.getElementById(targetId).value = val;
+}
+</script>
 
 <!-- BANNER MESSAGGI E TASTO CALENDARIO RAPIDO (Per tutti tranne Calendar Layout) -->
 <?php if ($layout_template !== 'calendar'): ?>
@@ -727,11 +881,12 @@ require_once 'header.php';
             <div class="row justify-content-center border-top border-bottom py-3 my-3">
                 <div class="col-md-3 border-end">
                     <span class="text-muted small fw-bold text-uppercase d-block">Da</span>
-                    <strong class="fs-5"><?php echo count($all_turni_flat) > 0 ? date('d/m/Y', strtotime($all_turni_flat[0]['data_turno'])) : '-'; ?></strong>
+<?php $date_con_valore = array_values(array_filter(array_column($all_turni_flat, 'data_turno'))); ?>
+                    <strong class="fs-5"><?php echo $date_con_valore ? date('d/m/Y', strtotime(min($date_con_valore))) : '-'; ?></strong>
                 </div>
                 <div class="col-md-3 border-end">
                     <span class="text-muted small fw-bold text-uppercase d-block">A</span>
-                    <strong class="fs-5"><?php echo count($all_turni_flat) > 0 ? date('d/m/Y', strtotime(end($all_turni_flat)['data_turno'])) : '-'; ?></strong>
+                    <strong class="fs-5"><?php echo $date_con_valore ? date('d/m/Y', strtotime(max($date_con_valore))) : '-'; ?></strong>
                 </div>
                 <div class="col-md-3">
                     <span class="text-muted small fw-bold text-uppercase d-block">Accesso</span>
@@ -811,7 +966,7 @@ require_once 'header.php';
                                 $disponibili = max(0, $t_flat['max_posti'] - $occ);
                                 $is_soldout_flag = ($disponibili <= 0) ? '1' : '0';
                                 
-                                $data_text = strtolower($t_flat['evento_titolo'] . ' ' . $t_flat['evento_luogo'] . ' ' . $t_flat['categoria']);
+                                $data_text = strtolower($t_flat['evento_titolo'] . ' ' . $t_flat['evento_luogo'] . ' ' . $t_flat['categoria'] . ' ' . ($t_flat['nome_turno'] ?? ''));
                                 $data_cat  = strtolower($t_flat['categoria']);
                                 $data_date = $t_flat['data_turno'];
                             ?>
@@ -841,8 +996,9 @@ require_once 'header.php';
                                             <?php endif; ?>
 
                                             <div class="d-flex flex-wrap gap-3 mb-3 text-secondary small fw-semibold">
-                                                <span><i class="fa fa-calendar-alt text-danger me-1"></i> <?php echo date('d/m/Y', strtotime($t_flat['data_turno'])); ?></span>
-                                                <span><i class="fa fa-clock text-primary me-1"></i> <?php echo substr($t_flat['orario_inizio'],0,5); ?> - <?php echo substr($t_flat['orario_fine'],0,5); ?></span>
+                                                <?php if (!empty($t_flat['nome_turno'])): ?><span><i class="fa fa-tag text-secondary me-1"></i> <?php echo htmlspecialchars($t_flat['nome_turno']); ?></span><?php endif; ?>
+                                                <?php if (!empty($t_flat['data_turno'])): ?><span><i class="fa fa-calendar-alt text-danger me-1"></i> <?php echo date('d/m/Y', strtotime($t_flat['data_turno'])); ?></span><?php endif; ?>
+                                                <?php if (orario_turno($t_flat) !== ''): ?><span><i class="fa fa-clock text-primary me-1"></i> <?php echo orario_turno($t_flat); ?></span><?php endif; ?>
                                             </div>
                                         </div>
 
@@ -946,6 +1102,229 @@ require_once 'header.php';
             <?php endif; ?>
         </div>
     </div>
+
+
+<!-- ======================================================= -->
+<!-- LAYOUT 6: GRUPPI / CORSI (discipline -> gruppi -> turni) -->
+<!-- ======================================================= -->
+<?php elseif ($layout_template === 'gruppi'): ?>
+    <style>
+        .gruppo-card { border-top: 4px solid <?php echo $col_primaria; ?> !important; border-radius: 12px; transition: box-shadow .2s ease; }
+        .gruppo-card:hover { box-shadow: 0 8px 22px rgba(0,0,0,.09) !important; }
+        .gruppo-card.gruppo-iscritto { outline: 2px solid #198754; }
+        .gruppo-desc { font-size: .9rem; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+        .gruppo-desc.aperta { -webkit-line-clamp: unset; display: block; }
+        .gruppi-pill { border-radius: 999px; font-weight: 600; font-size: .85rem; }
+        .gruppi-pill.active { background-color: <?php echo $col_primaria; ?> !important; border-color: <?php echo $col_primaria; ?> !important; color: #fff !important; }
+    </style>
+    <div class="container mb-5" style="max-width: <?php echo htmlspecialchars($page_cfg['larghezza_contenitore'] ?? '85%'); ?>;">
+
+        <div class="card shadow-sm border-0 p-4 mb-4" style="border-left: 5px solid <?php echo $col_primaria; ?> !important; border-radius: 12px;">
+            <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+                <div>
+                    <h1 class="fw-bold m-0" style="color: <?php echo $col_primaria; ?>; letter-spacing: -0.5px;"><?php echo htmlspecialchars(!empty($page_cfg['titolo']) ? $page_cfg['titolo'] : 'GRUPPI'); ?></h1>
+                    <?php if (!empty($page_cfg['sottotitolo'])): ?><div class="fs-5 fw-semibold text-secondary"><?php echo htmlspecialchars($page_cfg['sottotitolo']); ?></div><?php endif; ?>
+                </div>
+                <?php if (!empty($page_cfg['sidebar_intervallo_date'])): ?>
+                    <span class="badge bg-warning text-dark fw-bold px-3 py-2 fs-6 rounded-pill">📝 <?php echo htmlspecialchars($page_cfg['sidebar_intervallo_date']); ?></span>
+                <?php endif; ?>
+            </div>
+            <?php if (!empty($page_cfg['hero_descrizione'])): ?>
+                <div class="text-dark mt-3" style="font-size: .95rem; line-height: 1.6;"><?php echo $page_cfg['hero_descrizione']; ?></div>
+            <?php endif; ?>
+            <?php if ($limite_iscrizioni !== 'nessuno'): ?>
+                <div class="alert alert-info border-0 mb-0 mt-3 py-2 small fw-semibold">
+                    <i class="fa fa-circle-info me-1"></i>
+                    <?php echo $limite_iscrizioni === 'un_evento' ? "Puoi iscriverti a <strong>un solo gruppo</strong> di quest'area." : "Per ogni gruppo puoi scegliere <strong>un solo turno</strong>."; ?>
+                    Per cambiare, annulla prima la prenotazione dall'<a href="area_personale.php" class="alert-link">Area Personale</a>.
+                    Puoi invece metterti in <strong>lista d'attesa</strong> su più <?php echo $limite_iscrizioni === 'un_evento' ? 'gruppi' : 'turni'; ?>: appena ottieni un posto confermato, le altre liste d'attesa vengono annullate automaticamente.
+                </div>
+            <?php endif; ?>
+        </div>
+
+        <?php if (!empty($page_cfg['box_info_html']) || !empty($page_cfg['allegati_box_info'])): ?>
+            <div class="card shadow-sm border-0 p-4 mb-4" style="border-left: 5px solid #B30000 !important; border-radius: 8px;">
+                <?php if (!empty($page_cfg['box_info_html'])): ?><div class="fs-6 text-dark" style="line-height: 1.7;"><?php echo $page_cfg['box_info_html']; ?></div><?php endif; ?>
+                <?php if (!empty($page_cfg['allegati_box_info'])): ?>
+                    <div class="mt-3 pt-3 border-top d-flex flex-wrap gap-2">
+                        <?php foreach (explode(',', $page_cfg['allegati_box_info']) as $all): $all = trim($all); if ($all === '') continue; ?>
+                            <a href="<?php echo htmlspecialchars($all); ?>" target="_blank" class="btn btn-outline-danger btn-sm fw-bold"><i class="fa fa-file-pdf me-1"></i> Guida / Allegato (PDF)</a>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+
+        <?php if (empty($eventi_per_categoria)): ?>
+            <div class="alert alert-light text-center border p-4 shadow-sm">Nessun gruppo disponibile al momento.</div>
+        <?php else: ?>
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-4 p-3 bg-light border rounded-3">
+                <input type="search" id="gruppiCerca" class="form-control form-control-sm" placeholder="Cerca gruppo, luogo, istruttore..." style="max-width: 280px;" aria-label="Cerca gruppo">
+                <?php if (count($eventi_per_categoria) > 1): ?>
+                    <button type="button" class="btn btn-sm btn-outline-secondary gruppi-pill active" data-gruppi-cat="__all">Tutte</button>
+                    <?php foreach (array_keys($eventi_per_categoria) as $cat_nome): ?>
+                        <button type="button" class="btn btn-sm btn-outline-secondary gruppi-pill" data-gruppi-cat="<?php echo htmlspecialchars($cat_nome); ?>"><?php echo htmlspecialchars($cat_nome); ?></button>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+                <div class="form-check form-switch ms-lg-auto mb-0">
+                    <input class="form-check-input" type="checkbox" id="gruppiSoloLiberi">
+                    <label class="form-check-label small fw-bold" for="gruppiSoloLiberi">Solo con posti liberi</label>
+                </div>
+            </div>
+
+            <?php foreach ($eventi_per_categoria as $cat_nome => $lista_gruppi): ?>
+                <section class="gruppi-sezione mb-5" data-cat="<?php echo htmlspecialchars($cat_nome); ?>">
+                    <h3 class="fw-bold fs-4 border-bottom pb-2 mb-3" style="color: <?php echo $col_primaria; ?>;">
+                        <i class="fa fa-people-group me-2"></i><?php echo htmlspecialchars($cat_nome); ?>
+                        <span class="badge bg-light text-secondary border ms-2 align-middle" style="font-size: .75rem;"><?php echo count($lista_gruppi); ?> <?php echo count($lista_gruppi) === 1 ? 'gruppo' : 'gruppi'; ?></span>
+                    </h3>
+                    <div class="row g-4">
+                        <?php foreach ($lista_gruppi as $ev):
+                            $ev_id = (int)$ev['id'];
+                            // Solo le iscrizioni "vere" bloccano: le liste d'attesa no (decadono alla prima conferma)
+                            $miei_turni_ev = $mie_iscrizioni[$ev_id] ?? [];
+                            $iscritto_ev = (bool)array_diff($miei_turni_ev, ['in_attesa', 'richiesta_conferma']);
+                            $iscritto_altrove = false;
+                            foreach ($mie_iscrizioni as $ev_x => $turni_x) {
+                                if ($ev_x !== $ev_id && array_diff($turni_x, ['in_attesa', 'richiesta_conferma'])) { $iscritto_altrove = true; break; }
+                            }
+                            $bloccato_area = ($limite_iscrizioni === 'un_evento' && $iscritto_altrove && !$iscritto_ev);
+                            $bloccato_turni = ($limite_iscrizioni === 'un_turno' && $iscritto_ev);
+                            $ruolo_ev = (int)($ev['ruolo_accesso_id'] ?? 0);
+
+                            $righe_turni = []; $liberi_tot = 0;
+                            foreach ($ev['turni'] as $t) {
+                                $occ_g = getPostiOccupati($conn, $t['id']);
+                                $max_g = max(0, (int)$t['max_posti']);
+                                $disp_g = max(0, $max_g - $occ_g);
+                                if (!turno_concluso($t)) $liberi_tot += $disp_g;
+                                $righe_turni[] = ['t' => $t, 'occ' => $occ_g, 'max' => $max_g, 'disp' => $disp_g];
+                            }
+                            $search_txt = mb_strtolower($ev['titolo'] . ' ' . ($ev['luogo'] ?? '') . ' ' . strip_tags($ev['descrizione'] ?? '') . ' ' . $cat_nome);
+                        ?>
+                            <div class="<?php echo $col_class; ?> gruppo-item" data-search="<?php echo htmlspecialchars($search_txt); ?>" data-liberi="<?php echo (int)($ev['richiede_prenotazione'] ?? 1) === 0 ? 1 : $liberi_tot; ?>">
+                                <div class="card h-100 border-0 shadow-sm gruppo-card <?php echo $iscritto_ev ? 'gruppo-iscritto' : ''; ?>">
+                                    <?php if (!empty($ev['locandina_path']) && preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $ev['locandina_path'])): ?>
+                                        <img src="<?php echo htmlspecialchars($ev['locandina_path']); ?>" class="card-img-top" alt="" style="height: 160px; object-fit: cover; border-radius: 8px 8px 0 0;">
+                                    <?php endif; ?>
+                                    <div class="card-body p-4 d-flex flex-column">
+                                        <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+                                            <h5 class="fw-bold m-0" style="color: <?php echo $col_primaria; ?>;"><?php echo htmlspecialchars($ev['titolo']); ?></h5>
+                                            <div class="d-flex flex-column align-items-end gap-1">
+                                                <?php if ($iscritto_ev): ?><span class="badge bg-success"><i class="fa fa-check me-1"></i>Iscritto</span><?php endif; ?>
+                                                <?php if ($ruolo_ev === -1): ?><span class="badge bg-warning text-dark">🔑 Solo Autenticati</span>
+                                                <?php elseif ($ruolo_ev > 0): ?><span class="badge bg-dark">🔒 Solo <?php echo htmlspecialchars($nomi_ruoli[$ruolo_ev] ?? ''); ?></span><?php endif; ?>
+                                            </div>
+                                        </div>
+
+                                        <?php if (!empty($ev['luogo'])): ?>
+                                            <div class="small fw-semibold text-dark mb-2"><i class="fa fa-location-dot text-danger me-1"></i><?php echo htmlspecialchars($ev['luogo']); ?></div>
+                                        <?php endif; ?>
+
+                                        <?php if (!empty($ev['descrizione'])): ?>
+                                            <div class="gruppo-desc text-secondary mb-1"><?php echo $ev['descrizione']; ?></div>
+                                            <button type="button" class="btn btn-link btn-sm p-0 text-start mb-3 gruppo-desc-toggle" style="color: <?php echo $col_primaria; ?>;">Mostra dettagli</button>
+                                        <?php endif; ?>
+
+                                        <div class="mt-auto">
+                                            <?php if (empty($righe_turni)): ?>
+                                                <div class="small text-muted fst-italic">Orari in definizione.</div>
+                                            <?php endif; ?>
+                                            <?php foreach ($righe_turni as $rt):
+                                                $t = $rt['t'];
+                                                $pct = $rt['max'] > 0 ? min(100, round($rt['occ'] / $rt['max'] * 100)) : 100;
+                                                $bar = $pct >= 100 ? 'bg-danger' : ($pct >= 75 ? 'bg-warning' : 'bg-success');
+                                                $tf = $t + ['richiede_prenotazione' => $ev['richiede_prenotazione'], 'ruolo_accesso_id' => $ev['ruolo_accesso_id']];
+
+                                                $mio_stato_t = $miei_turni_ev[(int)$t['id']] ?? null;
+                                                if ($mio_stato_t === 'in_attesa' || $mio_stato_t === 'richiesta_conferma') {
+                                                    $btn = '<span class="badge bg-warning text-dark py-2 px-3"><i class="fa fa-hourglass-half me-1"></i>' . ($mio_stato_t === 'in_attesa' ? "In lista d'attesa" : 'Posto da confermare') . '</span>';
+                                                } elseif ($mio_stato_t !== null) {
+                                                    $btn = '<span class="badge bg-success py-2 px-3"><i class="fa fa-check me-1"></i>Sei iscritto</span>';
+                                                } else {
+                                                    $btn = getPulsanteAzione($tf, $col_primaria, $utente_logged, $utente_ruolo_id, $conn, $nomi_ruoli);
+                                                    if (strpos($btn, 'modPrenota') !== false && ($bloccato_area || $bloccato_turni)) {
+                                                        $motivo = $bloccato_area ? 'Hai già un gruppo' : 'Già iscritto a un turno';
+                                                        $btn = '<button class="btn btn-outline-secondary btn-sm fw-bold py-1 px-3" disabled><i class="fa fa-user-lock me-1"></i>' . $motivo . '</button>';
+                                                    }
+                                                }
+                                            ?>
+                                                <div class="border rounded-3 p-2 px-3 mb-2 bg-white">
+                                                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                                        <div class="small">
+                                                            <?php if (!empty($t['nome_turno'])): ?><strong class="text-dark" style="font-size: .95rem;"><?php echo htmlspecialchars($t['nome_turno']); ?></strong><?php endif; ?>
+                                                            <?php if (!empty($t['data_turno'])): ?><?php echo !empty($t['nome_turno']) ? '<span class="text-muted">·</span> ' : ''; ?><strong><?php echo formattaDataItaliano($t['data_turno']); ?></strong><?php endif; ?>
+                                                            <?php if (orario_turno($t) !== ''): ?><span class="text-muted">· <?php echo orario_turno($t); ?></span><?php endif; ?>
+                                                        </div>
+                                                        <div><?php echo $btn; ?></div>
+                                                    </div>
+                                                    <?php if ((int)($ev['richiede_prenotazione'] ?? 1) === 1): ?>
+                                                        <div class="progress mt-2" style="height: 6px;" role="progressbar" aria-label="Posti occupati" aria-valuenow="<?php echo $pct; ?>" aria-valuemin="0" aria-valuemax="100">
+                                                            <div class="progress-bar <?php echo $bar; ?>" style="width: <?php echo $pct; ?>%;"></div>
+                                                        </div>
+                                                        <div class="d-flex justify-content-between mt-1" style="font-size: .75rem;">
+                                                            <span class="text-muted"><?php echo $rt['occ']; ?>/<?php echo $rt['max']; ?> iscritti</span>
+                                                            <span class="fw-bold <?php echo $rt['disp'] > 0 ? 'text-success' : 'text-danger'; ?>"><?php echo $rt['disp'] > 0 ? $rt['disp'] . ($rt['disp'] === 1 ? ' posto libero' : ' posti liberi') : 'Completo'; ?></span>
+                                                        </div>
+                                                    <?php endif; ?>
+                                                </div>
+                                            <?php endforeach; ?>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                </section>
+            <?php endforeach; ?>
+            <div id="gruppiVuoto" class="alert alert-light text-center border p-4" style="display: none;">Nessun gruppo corrisponde ai filtri.</div>
+        <?php endif; ?>
+    </div>
+    <script>
+    (function () {
+        var cerca = document.getElementById('gruppiCerca');
+        if (!cerca) return;
+        var soloLiberi = document.getElementById('gruppiSoloLiberi');
+        var pills = document.querySelectorAll('[data-gruppi-cat]');
+        var catAttiva = '__all';
+
+        function applica() {
+            var term = cerca.value.trim().toLowerCase();
+            var totVisibili = 0;
+            document.querySelectorAll('.gruppi-sezione').forEach(function (sec) {
+                var catOk = (catAttiva === '__all' || sec.dataset.cat === catAttiva);
+                var vis = 0;
+                sec.querySelectorAll('.gruppo-item').forEach(function (it) {
+                    var ok = catOk && (!term || it.dataset.search.indexOf(term) !== -1) && (!soloLiberi.checked || parseInt(it.dataset.liberi, 10) > 0);
+                    it.style.display = ok ? '' : 'none';
+                    if (ok) vis++;
+                });
+                sec.style.display = vis ? '' : 'none';
+                totVisibili += vis;
+            });
+            document.getElementById('gruppiVuoto').style.display = totVisibili ? 'none' : '';
+        }
+
+        cerca.addEventListener('input', applica);
+        soloLiberi.addEventListener('change', applica);
+        pills.forEach(function (p) {
+            p.addEventListener('click', function () {
+                pills.forEach(function (x) { x.classList.remove('active'); });
+                p.classList.add('active');
+                catAttiva = p.dataset.gruppiCat;
+                applica();
+            });
+        });
+        document.querySelectorAll('.gruppo-desc-toggle').forEach(function (btn) {
+            var desc = btn.previousElementSibling;
+            if (desc.scrollHeight <= desc.clientHeight + 2) { btn.remove(); return; }
+            btn.addEventListener('click', function () {
+                var aperta = desc.classList.toggle('aperta');
+                btn.textContent = aperta ? 'Mostra meno' : 'Mostra dettagli';
+            });
+        });
+    })();
+    </script>
 
 
 <!-- ======================================================= -->

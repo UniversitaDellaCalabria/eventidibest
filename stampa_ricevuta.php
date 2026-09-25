@@ -101,8 +101,9 @@ $qr_api_url = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" .
                     <h6 class="fw-bold border-bottom pb-2 mb-3" style="color: #B80000;"><i class="fa fa-calendar-alt me-1"></i> Dettaglio Evento</h6>
                     <p class="mb-2"><strong>Iniziativa:</strong> <br><span class="text-secondary"><?php echo htmlspecialchars($p['pagina_titolo']); ?></span></p>
                     <p class="mb-2"><strong>Attività:</strong> <br><span class="text-dark fw-bold"><?php echo htmlspecialchars($p['evento_titolo']); ?></span></p>
-                    <p class="mb-2"><strong>Data:</strong> <br><span class="fw-bold" style="color: #B80000;">📅 <?php echo date('d/m/Y', strtotime($p['data_turno'])); ?></span></p>
-                    <p class="mb-2"><strong>Orario:</strong> <br><span class="text-dark">🕒 <?php echo substr($p['orario_inizio'], 0, 5); ?> - <?php echo substr($p['orario_fine'], 0, 5); ?></span></p>
+                    <?php if (!empty($p['nome_turno'])): ?><p class="mb-2"><strong>Turno / Gruppo:</strong> <br><span class="fw-bold text-dark">🏷️ <?php echo htmlspecialchars($p['nome_turno']); ?></span></p><?php endif; ?>
+                    <?php if (!empty($p['data_turno'])): ?><p class="mb-2"><strong>Data:</strong> <br><span class="fw-bold" style="color: #B80000;">📅 <?php echo date('d/m/Y', strtotime($p['data_turno'])); ?></span></p><?php endif; ?>
+                    <?php if (orario_turno($p) !== ''): ?><p class="mb-2"><strong>Orario:</strong> <br><span class="text-dark">🕒 <?php echo orario_turno($p); ?></span></p><?php endif; ?>
                     <p class="mb-0"><strong>Luogo:</strong> <br><span class="text-secondary">📍 <?php echo htmlspecialchars($p['evento_luogo'] ?: 'DiBEST Unical'); ?></span></p>
                 </div>
 

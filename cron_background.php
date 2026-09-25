@@ -42,20 +42,20 @@ echo "Inizio Esecuzione CRON: $now\n";
 // =========================================================================
 // TASK 0: AUTO-ARCHIVIAZIONE EVENTI SCADUTI
 // =========================================================================
-$conn->query("UPDATE eventi e SET e.archiviato = 1 WHERE e.archiviato = 0 AND (e.blocca_auto_archivio IS NULL OR e.blocca_auto_archivio = 0) AND (SELECT MAX(data_turno) FROM turni t WHERE t.evento_id = e.id) < CURDATE()");
+$conn->query("UPDATE eventi e SET e.archiviato = 1 WHERE e.archiviato = 0 AND (e.blocca_auto_archivio IS NULL OR e.blocca_auto_archivio = 0) AND (SELECT MAX(data_turno) FROM turni t WHERE t.evento_id = e.id) < CURDATE() AND NOT EXISTS (SELECT 1 FROM turni t2 WHERE t2.evento_id = e.id AND t2.data_turno IS NULL)");
 echo "- Auto-archiviati " . $conn->affected_rows . " eventi scaduti.\n";
 
 // =========================================================================
 // TASK 1: EMAIL POST-EVENTO (Attestati e Sondaggi)
 // =========================================================================
 // Seleziona i presenti a eventi finiti, a cui NON è ancora stata mandata l'email
-$sql_post = "SELECT pr.*, t.data_turno, t.orario_inizio, t.orario_fine, e.titolo as evento_titolo, e.luogo 
-             FROM prenotazioni pr 
-             JOIN turni t ON pr.turno_id = t.id 
-             JOIN eventi e ON t.evento_id = e.id 
-             WHERE pr.presente = 1 
-             AND pr.email_post_evento_inviata = 0 
-             AND CONCAT(t.data_turno, ' ', t.orario_fine) < '$now'";
+$sql_post = "SELECT pr.*, t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine, e.titolo as evento_titolo, e.luogo
+             FROM prenotazioni pr
+             JOIN turni t ON pr.turno_id = t.id
+             JOIN eventi e ON t.evento_id = e.id
+             WHERE pr.presente = 1
+             AND pr.email_post_evento_inviata = 0
+             AND (t.data_turno IS NULL OR CONCAT(t.data_turno, ' ', COALESCE(t.orario_fine, '23:59:59')) < '$now')";
 
 $res_post = $conn->query($sql_post);
 $count_post = 0;
@@ -67,8 +67,9 @@ if ($res_post && $res_post->num_rows > 0) {
 
     while ($p = $res_post->fetch_assoc()) {
         $r_find = ['{NOME}', '{COGNOME}', '{MATRICOLA}', '{TITOLO_EVENTO}', '{DATA_TURNO}', '{ORARIO_TURNO}', '{LUOGO}', '{LINK_AREA_PERSONALE}'];
-        $ora_f = substr($p['orario_inizio'],0,5).' - '.substr($p['orario_fine'],0,5);
-        $r_repl = [$p['nome'], $p['cognome'], $p['matricola'], $p['evento_titolo'], date('d/m/Y', strtotime($p['data_turno'])), $ora_f, $p['luogo'], $link_area];
+        $ora_f = orario_turno($p) ?: 'da definire';
+        $data_f = implode(' · ', array_filter([$p['nome_turno'] ?? '', !empty($p['data_turno']) ? date('d/m/Y', strtotime($p['data_turno'])) : '']));
+        $r_repl = [$p['nome'], $p['cognome'], $p['matricola'], $p['evento_titolo'], $data_f, $ora_f, $p['luogo'], $link_area];
 
         // 1. Invia Avviso Attestato Disponibile (se configurato)
         if (!empty($sys['email_attestato_corpo'])) {

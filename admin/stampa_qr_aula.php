@@ -137,8 +137,9 @@ if ($res_cfg && $row_cfg = $res_cfg->fetch_assoc()) {
     <p class="fs-5 text-muted fw-bold mb-5 mx-auto" style="max-width: 550px;">Usa la fotocamera del tuo smartphone per registrare la tua presenza all'evento.</p>
     
     <div class="mt-4 pt-4 border-top w-100 d-flex justify-content-center gap-4 text-muted fw-bold fs-5 mx-auto flex-wrap">
-        <span><i class="fa fa-calendar-day me-1"></i> <?php echo date('d/m/Y', strtotime($turno['data_turno'])); ?></span>
-        <span><i class="fa fa-clock me-1"></i> <?php echo substr($turno['orario_inizio'],0,5); ?></span>
+        <?php if (!empty($turno['nome_turno'])): ?><span><i class="fa fa-tag me-1"></i> <?php echo htmlspecialchars($turno['nome_turno']); ?></span><?php endif; ?>
+        <?php if (!empty($turno['data_turno'])): ?><span><i class="fa fa-calendar-day me-1"></i> <?php echo date('d/m/Y', strtotime($turno['data_turno'])); ?></span><?php endif; ?>
+        <?php if (!empty($turno['orario_inizio'])): ?><span><i class="fa fa-clock me-1"></i> <?php echo substr($turno['orario_inizio'],0,5); ?></span><?php endif; ?>
         <span><i class="fa fa-map-marker-alt me-1"></i> <?php echo htmlspecialchars($turno['luogo'] ?: 'Aula Non Specificata'); ?></span>
     </div>
 </div>

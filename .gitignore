@@ -29,3 +29,4 @@ php_errors.log
 # Composer (se aggiunto in futuro)
 vendor/
 composer.lock
+.claude/

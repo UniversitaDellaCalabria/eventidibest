@@ -38,6 +38,9 @@ if (file_exists($simplesaml_path)) {
     $as = new \SimpleSAML\Auth\Simple('default-sp');
     $as->requireAuth();
 
+    // Attributi letti PRIMA di cleanup(), come in sync_sso_user(): dopo, la sessione SimpleSAML viene chiusa
+    $attributes = $as->getAttributes();
+
     // Ripristina la nostra sessione PHP (pattern LibreBooking adSAML::Cleanup)
     \SimpleSAML\Session::getSessionFromRequest()->cleanup();
 
@@ -49,8 +52,6 @@ if (file_exists($simplesaml_path)) {
         session_start();
     }
 
-    $attributes = $as->getAttributes();
-    
     // CODICE FISCALE
     $cf_saml = $attributes['codice_fiscale'][0] ?? null;
     if (!$cf_saml && !empty($attributes['urn:oid:1.3.6.1.4.1.25178.1.2.15'][0])) {
@@ -93,9 +94,10 @@ if (file_exists($simplesaml_path)) {
 
     if (empty($nome_saml)) { $nome_saml = 'Utente'; }
 
-    $email_saml = $attributes['mail'][0] ?? ($attributes['email'][0] ?? '');
     $matr_stud  = $attributes['matricola_studente'][0] ?? ($attributes['schacPersonalUniqueCode'][0] ?? '');
     $matr_dip   = $attributes['matricola_dipendente'][0] ?? '';
+    // Studente → @studenti.unical.it, dipendente → @unical.it, SPID/CIE → email personale
+    $email_saml = estrai_email_saml($attributes, tipo_utente_saml((string)$matr_stud, (string)$matr_dip));
 
     if ($cf_saml) {
         $cf_clean      = strtoupper(trim($cf_saml));
@@ -117,6 +119,8 @@ if (file_exists($simplesaml_path)) {
             $stmt_upd = $conn->prepare("UPDATE utenti SET ultimo_accesso = NOW(), email = IF(? != '' AND email_personalizzata = 0, ?, email), nome = IF(nome = 'Utente' AND ? != 'Utente', ?, nome), cognome = IF(cognome = '' AND ? != '', ?, cognome) WHERE id = ?");
             $stmt_upd->bind_param("ssssssi", $email_clean, $email_clean, $nome_clean, $nome_clean, $cognome_clean, $cognome_clean, $u_id);
             $stmt_upd->execute();
+            // $u_info è stato letto prima dell'UPDATE: allinea l'email così la sessione non resta con quella vecchia/vuota
+            if ($email_clean !== '' && (int)($u_info['email_personalizzata'] ?? 0) === 0) { $u_info['email'] = $email_clean; }
         } else {
             $default_role = !empty($matr_stud_c) ? 3 : (!empty($matr_dip_c) ? 4 : 5);
             $matr_gen = !empty($matr_stud_c) ? $matr_stud_c : $matr_dip_c;

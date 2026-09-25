@@ -66,6 +66,31 @@ if (isset($_POST['ajax_action'])) {
     }
 }
 
+// ==============================================================================
+// AJAX: ricerca utenti registrati per prenotazione manuale
+// ==============================================================================
+if (isset($_GET['ajax_cerca_utenti'])) {
+    require_once '../config.php';
+    require_once '../functions.php';
+    header('Content-Type: application/json');
+    sync_sso_user($conn);
+    $role_id   = (int)($_SESSION['utente_ruolo_id'] ?? 5);
+    $sec_roles = isset($_SESSION['utente_ruoli_secondari']) ? explode(',', $_SESSION['utente_ruoli_secondari']) : [];
+    if ($role_id !== 1 && $role_id !== 2 && !in_array('1', $sec_roles) && !in_array('2', $sec_roles)) {
+        echo json_encode([]); exit;
+    }
+    $q = '%' . trim($_GET['q'] ?? '') . '%';
+    $stmt_u = $conn->prepare("SELECT id, nome, cognome, email, COALESCE(NULLIF(matricola_studente,''), NULLIF(matricola_dipendente,''), NULLIF(matricola,''), '') AS matricola FROM utenti WHERE (nome LIKE ? OR cognome LIKE ? OR email LIKE ? OR matricola_studente LIKE ? OR matricola_dipendente LIKE ? OR matricola LIKE ?) ORDER BY cognome, nome LIMIT 20");
+    $stmt_u->bind_param("ssssss", $q, $q, $q, $q, $q, $q);
+    $stmt_u->execute();
+    $res_u = $stmt_u->get_result();
+    $out = [];
+    while ($row = $res_u->fetch_assoc()) {
+        $out[] = ['id' => $row['id'], 'nome' => $row['nome'], 'cognome' => $row['cognome'], 'email' => $row['email'], 'matricola' => $row['matricola']];
+    }
+    echo json_encode($out); exit;
+}
+
 // 2. CARICAMENTO NORMALE DELLA PAGINA ADMIN
 require_once 'admin_header.php';
 
@@ -114,8 +139,9 @@ if (!$is_archivio) {
         $p_data = get_prenotazione_con_turno_evento($conn, $pr_id);
         if ($p_data) {
             $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = $pr_id");
-            $data_formatted = date('d/m/Y', strtotime($p_data['data_turno']));
-            $ora_formatted = substr($p_data['orario_inizio'], 0, 5) . ' - ' . substr($p_data['orario_fine'], 0, 5);
+            decadi_attese_vincolate($conn, $pr_id);
+            $data_formatted = implode(' · ', array_filter([$p_data['nome_turno'] ?? '', !empty($p_data['data_turno']) ? date('d/m/Y', strtotime($p_data['data_turno'])) : '']));
+            $ora_formatted = orario_turno($p_data) ?: 'da definire';
             $proto = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
             $domain = $_SERVER['HTTP_HOST'] ?? 'localhost';
             $base_dir = rtrim(dirname(dirname($_SERVER['PHP_SELF'])), '/\\');
@@ -239,6 +265,7 @@ if (!$is_archivio) {
             $stmt_man = $conn->prepare("INSERT INTO prenotazioni (turno_id, codice_prenotazione, stato, num_posti, nome, cognome, email, matricola) VALUES (?, ?, 'confermata', ?, ?, ?, ?, ?)");
             $stmt_man->bind_param("isisss" . "s", $turno_id, $codice_p, $num_posti, $nome, $cognome, $email, $matricola);
             if ($stmt_man->execute()) {
+                decadi_attese_vincolate($conn, (int)$stmt_man->insert_id);
                 flash_set("✅ Prenotazione manuale inserita! Codice: <strong>$codice_p</strong>");
                 if (!empty($email)) {
                     $body_conf = "<p>Gentile <strong>" . htmlspecialchars($nome . ' ' . $cognome) . "</strong>,</p>"
@@ -286,9 +313,9 @@ if (isset($_POST['export_xls']) || isset($_POST['export_csv'])) {
     
     $custom_cols = get_campi_custom_export($conn, $p_export);
 
-    $sql_export = "SELECT pr.codice_prenotazione, pr.presente, IFNULL(pr.stato, 'confermata') as stato, COALESCE(pr.num_posti, 1) as num_posti, pr.nome, pr.cognome, COALESCE(NULLIF(pr.matricola, ''), u.matricola_studente, u.matricola_dipendente, u.matricola, '') as matricola_effettiva, pr.email, e.titolo as evento, t.data_turno, t.orario_inizio, pr.dati_custom_json, pr.data_prenotazione 
+    $sql_export = "SELECT pr.codice_prenotazione, pr.presente, IFNULL(pr.stato, 'confermata') as stato, COALESCE(pr.num_posti, 1) as num_posti, pr.nome, pr.cognome, COALESCE(NULLIF(pr.matricola, ''), u.matricola_studente, u.matricola_dipendente, u.matricola, '') as matricola_effettiva, pr.email, e.titolo as evento, t.nome_turno, t.data_turno, t.orario_inizio, pr.dati_custom_json, pr.data_prenotazione
                 FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id LEFT JOIN utenti u ON pr.utente_id = u.id
-                WHERE e.pagina_id = $p_export $cond_turno_exp $cond_stato_exp ORDER BY t.data_turno ASC, pr.data_prenotazione DESC";
+                WHERE e.pagina_id = $p_export $cond_turno_exp $cond_stato_exp ORDER BY (t.data_turno IS NULL), t.data_turno ASC, t.nome_turno ASC, pr.data_prenotazione DESC";
     $res_export = $conn->query($sql_export);
 
     ob_end_clean(); 
@@ -297,12 +324,12 @@ if (isset($_POST['export_xls']) || isset($_POST['export_csv'])) {
         header("Content-Disposition: attachment; filename=iscritti_pagina_{$p_export}.xls");
         header("Pragma: no-cache"); header("Expires: 0");
         echo '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"></head><body><table border="1">';
-        echo '<tr><th>Codice</th><th>Stato</th><th>Presenza</th><th>Posti</th><th>Nome</th><th>Cognome</th><th>Matricola</th><th>Email</th><th>Evento</th><th>Data</th><th>Ora</th>';
+        echo '<tr><th>Codice</th><th>Stato</th><th>Presenza</th><th>Posti</th><th>Nome</th><th>Cognome</th><th>Matricola</th><th>Email</th><th>Evento</th><th>Turno</th><th>Data</th><th>Ora</th>';
         foreach ($custom_cols as $key => $label) echo '<th>' . htmlspecialchars($label) . '</th>';
         echo '<th>Data Registrazione</th></tr>';
         while($row = $res_export->fetch_assoc()) { 
             $json = json_decode($row['dati_custom_json'] ?? '', true) ?: [];
-            echo '<tr><td>'.htmlspecialchars($row['codice_prenotazione']).'</td><td>'.htmlspecialchars($row['stato']).'</td><td>'.($row['presente'] == 1 ? 'SI' : 'NO').'</td><td>'.htmlspecialchars($row['num_posti']).'</td><td>'.htmlspecialchars($row['nome']).'</td><td>'.htmlspecialchars($row['cognome']).'</td><td>'.htmlspecialchars($row['matricola_effettiva']).'</td><td>'.htmlspecialchars($row['email']).'</td><td>'.htmlspecialchars($row['evento']).'</td><td>'.htmlspecialchars($row['data_turno']).'</td><td>'.htmlspecialchars($row['orario_inizio']).'</td>';
+            echo '<tr><td>'.htmlspecialchars($row['codice_prenotazione']).'</td><td>'.htmlspecialchars($row['stato']).'</td><td>'.($row['presente'] == 1 ? 'SI' : 'NO').'</td><td>'.htmlspecialchars($row['num_posti']).'</td><td>'.htmlspecialchars($row['nome']).'</td><td>'.htmlspecialchars($row['cognome']).'</td><td>'.htmlspecialchars($row['matricola_effettiva']).'</td><td>'.htmlspecialchars($row['email']).'</td><td>'.htmlspecialchars($row['evento']).'</td><td>'.htmlspecialchars($row['nome_turno'] ?? '').'</td><td>'.htmlspecialchars($row['data_turno'] ?? '').'</td><td>'.htmlspecialchars($row['orario_inizio'] ?? '').'</td>';
             foreach ($custom_cols as $key => $label) {
                 $val_c = $json[$key] ?? '';
                 if ($val_c === '') { foreach ($json as $jk => $jv) { if (strtolower($jk) === strtolower($key) || strtolower($jk) === strtolower(str_replace(' ', '_', $label))) { $val_c = $jv; break; } } }
@@ -315,13 +342,13 @@ if (isset($_POST['export_xls']) || isset($_POST['export_csv'])) {
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename=iscritti_pagina_' . $p_export . '.csv');
         $output = fopen('php://output', 'w');
-        $headers = ['Codice', 'Stato', 'Presenza', 'Posti', 'Nome', 'Cognome', 'Matricola', 'Email', 'Evento', 'Data', 'Ora'];
+        $headers = ['Codice', 'Stato', 'Presenza', 'Posti', 'Nome', 'Cognome', 'Matricola', 'Email', 'Evento', 'Turno', 'Data', 'Ora'];
         foreach ($custom_cols as $key => $label) $headers[] = $label;
         $headers[] = 'Data Registrazione';
         fputcsv($output, $headers);
         while($row = $res_export->fetch_assoc()) { 
             $json = json_decode($row['dati_custom_json'] ?? '', true) ?: [];
-            $line = [$row['codice_prenotazione'], $row['stato'], ($row['presente'] == 1 ? 'SI' : 'NO'), $row['num_posti'], $row['nome'], $row['cognome'], $row['matricola_effettiva'], $row['email'], $row['evento'], $row['data_turno'], $row['orario_inizio']];
+            $line = [$row['codice_prenotazione'], $row['stato'], ($row['presente'] == 1 ? 'SI' : 'NO'), $row['num_posti'], $row['nome'], $row['cognome'], $row['matricola_effettiva'], $row['email'], $row['evento'], $row['nome_turno'] ?? '', $row['data_turno'] ?? '', $row['orario_inizio'] ?? ''];
             foreach ($custom_cols as $key => $label) {
                 $val_c = $json[$key] ?? '';
                 if ($val_c === '') { foreach ($json as $jk => $jv) { if (strtolower($jk) === strtolower($key) || strtolower($jk) === strtolower(str_replace(' ', '_', $label))) { $val_c = $jv; break; } } }
@@ -365,7 +392,7 @@ $total_pages = max(1, (int)ceil($total_count / $per_page));
 $page = min($page, $total_pages);
 $offset = ($page - 1) * $per_page;
 $sql_pr = "SELECT pr.*, COALESCE(NULLIF(pr.matricola, ''), u.matricola_studente, u.matricola_dipendente, u.matricola) as matricola_effettiva,
-           t.data_turno, t.orario_inizio, t.orario_fine, t.evento_id, e.titolo as evento_titolo, e.luogo as evento_luogo, e.abilita_presenze
+           t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine, t.evento_id, e.titolo as evento_titolo, e.luogo as evento_luogo, e.abilita_presenze
            FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id LEFT JOIN utenti u ON pr.utente_id = u.id
            $where_pr ORDER BY pr.data_prenotazione DESC LIMIT $per_page OFFSET $offset";
 $res_pr = $conn->query($sql_pr);
@@ -375,258 +402,269 @@ $pr_ids = array_column($prenotazioni, 'id');
 $messaggi_per_pr = get_messaggi_per_prenotazioni($conn, $pr_ids);
 ?>
 
+<?php
+$col_area_i = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
+?>
+<style>
+.isc-wrap { border-radius:12px; border:1px solid #e2e8f0; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.05); overflow:hidden; }
+.isc-filters { padding:14px 16px; border-bottom:1px solid #f1f5f9; background:#fafafa; }
+.isc-table thead th { background:#1e293b; color:#cbd5e1; font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; border:none; padding:10px 14px; }
+.isc-table tbody tr { border-bottom:1px solid #f1f5f9; transition:background .12s; }
+.isc-table tbody tr:last-child { border-bottom:none; }
+.isc-table tbody tr:hover { background:#f8fafc; }
+.isc-table td { padding:10px 14px; vertical-align:middle; border:none; }
+.avatar-circle { width:36px; height:36px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.75rem; font-weight:700; color:#fff; flex-shrink:0; }
+.stato-badge { display:inline-flex; align-items:center; gap:4px; padding:3px 10px; border-radius:20px; font-size:.72rem; font-weight:700; white-space:nowrap; }
+.presenza-btn { border:none; border-radius:20px; padding:3px 10px; font-size:.72rem; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; gap:4px; transition:all .15s; }
+.act-btn { width:30px; height:30px; border-radius:7px; display:inline-flex; align-items:center; justify-content:center; font-size:.78rem; border:1px solid #e2e8f0; background:#f8fafc; color:#475569; text-decoration:none; cursor:pointer; transition:all .12s; }
+.act-btn:hover { background:#f1f5f9; color:#0f172a; }
+.act-btn.green { border-color:#bbf7d0; background:#f0fdf4; color:#16a34a; }
+.act-btn.green:hover { background:#dcfce7; }
+.act-btn.blue { border-color:#bfdbfe; background:#eff6ff; color:#1d4ed8; }
+.act-btn.blue:hover { background:#dbeafe; }
+.act-btn.red { border-color:#fecaca; background:#fff1f2; color:#dc2626; }
+.act-btn.red:hover { background:#fee2e2; }
+.act-btn.orange { border-color:#fed7aa; background:#fff7ed; color:#c2410c; }
+.act-btn.orange:hover { background:#ffedd5; }
+.filter-chip { display:inline-flex; align-items:center; gap:6px; padding:5px 12px; border-radius:20px; border:1px solid #e2e8f0; background:#fff; font-size:.78rem; font-weight:600; color:#475569; cursor:pointer; transition:all .12s; }
+.filter-chip:hover { border-color:#94a3b8; color:#0f172a; }
+.filter-chip.active { background:<?php echo $col_area_i; ?>18; border-color:<?php echo $col_area_i; ?>; color:<?php echo $col_area_i; ?>; }
+</style>
+
 <!-- FRONT-END DELLA PAGINA -->
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h4 class="fw-bold text-dark m-0">
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <div>
+        <h4 class="fw-bold text-dark mb-0">
+            <?php if ($is_archivio): ?>
+                <i class="fa fa-archive me-2 text-secondary"></i>Archivio Iscritti
+            <?php else: ?>
+                <i class="fa fa-users me-2" style="color:<?php echo $col_area_i; ?>"></i>Iscritti & Check-in
+            <?php endif; ?>
+        </h4>
+        <div class="text-muted mt-1" style="font-size:.8rem;"><?php echo htmlspecialchars($page_cfg['titolo'] ?? ''); ?> &mdash; <?php echo number_format($total_count); ?> iscritti trovati</div>
+    </div>
+    <div class="d-flex gap-2 flex-wrap align-items-center">
         <?php if ($is_archivio): ?>
-            <i class="fa fa-archive text-secondary me-2"></i> Archivio Iscritti
+            <a href="archivio.php?p_id=<?php echo $filtro_p; ?>" class="btn btn-outline-secondary btn-sm fw-bold" style="border-radius:8px;"><i class="fa fa-arrow-left me-1"></i>Archivio</a>
+            <span class="badge p-2" style="background:#f1f5f9;color:#64748b;border-radius:8px;"><i class="fa fa-lock me-1"></i>Sola Lettura</span>
         <?php else: ?>
-            <i class="fa fa-users text-primary me-2"></i> Iscritti & Check-in
+            <a href="../checkin.php" target="_blank" class="btn btn-sm fw-bold text-white" style="background:<?php echo $col_area_i; ?>;border-radius:8px;border:none;"><i class="fa fa-qrcode me-1"></i>Scanner</a>
+            <a href="../cron_attestati.php" class="btn btn-sm btn-outline-success fw-bold" style="border-radius:8px;" data-confirm="Vuoi scansionare tutti gli eventi terminati e inviare le email agli studenti presenti?"><i class="fa fa-graduation-cap me-1"></i>Attestati</a>
+            <button type="button" class="btn btn-sm fw-bold" style="border-radius:8px;background:#f1f5f9;border:1px solid #e2e8f0;color:#334155;" data-bs-toggle="modal" data-bs-target="#modMailMassiva"><i class="fa fa-paper-plane me-1"></i>Mail Massiva</button>
+            <button type="button" class="btn btn-sm fw-bold text-white" style="background:<?php echo $col_area_i; ?>;border-radius:8px;border:none;" data-bs-toggle="modal" data-bs-target="#modPrenotazioneManuale"><i class="fa fa-user-plus me-1"></i>+ Manuale</button>
         <?php endif; ?>
-    </h4>
-    <?php if ($is_archivio): ?>
-        <a href="archivio.php?p_id=<?php echo $filtro_p; ?>" class="btn btn-secondary btn-sm fw-bold shadow-sm"><i class="fa fa-arrow-left me-1"></i> Torna all'Archivio</a>
-    <?php endif; ?>
+        <a href="stampa_lista_iscritti.php?p_id=<?php echo $filtro_p; ?>&f_turno=<?php echo $filtro_turno; ?>&f_stato=<?php echo urlencode($filtro_stato); ?>&f_cerca=<?php echo urlencode($filtro_cerca); ?>&f_data_da=<?php echo urlencode($filtro_data_da); ?>&f_data_fine=<?php echo urlencode($filtro_data_fine); ?><?php echo $is_archivio ? '&archivio=1' : ''; ?>" target="_blank" class="btn btn-sm btn-outline-secondary fw-bold" style="border-radius:8px;"><i class="fa fa-print me-1"></i>Stampa</a>
+        <form method="POST" class="d-flex gap-1">
+            <?php csrf_field(); ?>
+            <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+            <?php if ($is_archivio): ?><input type="hidden" name="archivio" value="1"><?php endif; ?>
+            <input type="hidden" name="f_turno_export" value="<?php echo $filtro_turno; ?>">
+            <input type="hidden" name="f_stato_export" value="<?php echo htmlspecialchars($filtro_stato); ?>">
+            <input type="hidden" name="f_data_da_export" value="<?php echo htmlspecialchars($filtro_data_da); ?>">
+            <input type="hidden" name="f_data_fine_export" value="<?php echo htmlspecialchars($filtro_data_fine); ?>">
+            <button type="submit" name="export_xls" class="btn btn-sm btn-outline-success fw-bold" style="border-radius:8px;" title="Esporta Excel"><i class="fa fa-file-excel"></i></button>
+            <button type="submit" name="export_csv" class="btn btn-sm btn-outline-secondary fw-bold" style="border-radius:8px;" title="Esporta CSV"><i class="fa fa-file-csv"></i></button>
+        </form>
+    </div>
 </div>
 
-<div class="card shadow-sm border-0">
-    <div class="card-header bg-white py-3 d-flex flex-column gap-3">
-        
-        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
-            <span class="fw-bold text-primary fs-5">
-                Iscritti <?php echo $is_archivio ? 'Archiviati ' : ''; ?>alla Pagina: <?php echo htmlspecialchars($page_cfg['titolo'] ?? ''); ?>
-            </span>
-            <div class="d-flex align-items-center gap-2 flex-wrap">
-                <?php if (!$is_archivio): ?>
-                    <a href="../checkin.php" target="_blank" class="btn btn-outline-dark btn-sm fw-bold shadow-sm">
-                        <i class="fa fa-qrcode me-1"></i> Apri Scanner QR
-                    </a>
-                <?php endif; ?>
-                <a href="stampa_lista_iscritti.php?p_id=<?php echo $filtro_p; ?>&f_turno=<?php echo $filtro_turno; ?>&f_stato=<?php echo urlencode($filtro_stato); ?>&f_cerca=<?php echo urlencode($filtro_cerca); ?>&f_data_da=<?php echo urlencode($filtro_data_da); ?>&f_data_fine=<?php echo urlencode($filtro_data_fine); ?><?php echo $is_archivio ? '&archivio=1' : ''; ?>" target="_blank" class="btn btn-outline-secondary btn-sm fw-bold shadow-sm">
-                    <i class="fa fa-print me-1"></i> Stampa Lista
-                </a>
-                <?php if (!$is_archivio): ?>
-                    <a href="../cron_attestati.php" class="btn btn-success btn-sm fw-bold text-white shadow-sm" data-confirm="Vuoi scansionare tutti gli eventi terminati e inviare le email agli studenti presenti?">
-                        <i class="fa fa-graduation-cap me-1"></i> Invia Attestati Ora
-                    </a>
-                    <button type="button" class="btn btn-primary btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#modPrenotazioneManuale">
-                        <i class="fa fa-user-plus me-1"></i> + Prenotazione Manuale
-                    </button>
-                <?php else: ?>
-                    <span class="badge bg-secondary p-2 shadow-sm"><i class="fa fa-lock me-1"></i> Sola Lettura</span>
-                <?php endif; ?>
+<div class="isc-wrap">
+    <!-- FILTRI -->
+    <div class="isc-filters">
+        <form method="GET" id="formFiltroTurno" class="d-flex flex-wrap gap-2 align-items-center">
+            <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+            <?php if ($is_archivio): ?><input type="hidden" name="archivio" value="1"><?php endif; ?>
+
+            <select name="f_turno" class="form-select form-select-sm" style="max-width:220px;border-radius:8px;" onchange="document.getElementById('formFiltroTurno').submit();">
+                <option value="0">Tutti gli eventi</option>
+                <?php foreach ($tutti_gli_eventi as $ev_m): ?>
+                    <optgroup label="<?php echo mb_strimwidth(htmlspecialchars($ev_m['titolo']), 0, 40, '...'); ?>">
+                        <?php foreach ($ev_m['turni'] as $t_m): ?>
+                            <option value="<?php echo $t_m['id']; ?>" <?php echo $filtro_turno == $t_m['id'] ? 'selected' : ''; ?>>
+                                <?php echo htmlspecialchars(etichetta_turno($t_m)); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </optgroup>
+                <?php endforeach; ?>
+            </select>
+
+            <select name="f_stato" class="form-select form-select-sm" style="max-width:160px;border-radius:8px;" onchange="document.getElementById('formFiltroTurno').submit();">
+                <option value="">Tutti gli stati</option>
+                <option value="confermata"   <?php echo $filtro_stato==='confermata'   ? 'selected':'' ?>>Confermata</option>
+                <option value="in_attesa"    <?php echo $filtro_stato==='in_attesa'    ? 'selected':'' ?>>In Attesa</option>
+                <option value="da_approvare" <?php echo $filtro_stato==='da_approvare' ? 'selected':'' ?>>Da Approvare</option>
+                <option value="annullata"    <?php echo $filtro_stato==='annullata'    ? 'selected':'' ?>>Annullata</option>
+                <option value="rifiutata"    <?php echo $filtro_stato==='rifiutata'    ? 'selected':'' ?>>Rifiutata</option>
+            </select>
+
+            <input type="date" name="f_data_da" class="form-control form-control-sm" style="max-width:135px;border-radius:8px;" value="<?php echo htmlspecialchars($filtro_data_da); ?>" title="Data dal">
+            <span class="text-muted">—</span>
+            <input type="date" name="f_data_fine" class="form-control form-control-sm" style="max-width:135px;border-radius:8px;" value="<?php echo htmlspecialchars($filtro_data_fine); ?>" title="Data al">
+
+            <div class="input-group input-group-sm" style="max-width:220px;">
+                <input type="text" name="f_cerca" class="form-control" style="border-radius:8px 0 0 8px;" placeholder="Nome, email, codice..." value="<?php echo htmlspecialchars($filtro_cerca); ?>">
+                <button type="submit" class="btn btn-outline-secondary" style="border-radius:0 8px 8px 0;"><i class="fa fa-search"></i></button>
             </div>
-        </div>
 
-        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 bg-light p-2 rounded border">
-            <form method="GET" class="d-inline-flex gap-2 m-0 align-items-center flex-wrap" id="formFiltroTurno">
-                <i class="fa fa-filter text-secondary"></i>
-                <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                <?php if ($is_archivio): ?><input type="hidden" name="archivio" value="1"><?php endif; ?>
-                
-                <select name="f_turno" class="form-select form-select-sm fw-bold border-primary text-primary shadow-sm" onchange="document.getElementById('formFiltroTurno').submit();" style="min-width: 200px;">
-                    <option value="0">Tutti gli Eventi / Turni</option>
-                    <?php foreach ($tutti_gli_eventi as $ev_m): ?>
-                        <optgroup label="<?php echo mb_strimwidth(htmlspecialchars($ev_m['titolo']), 0, 40, '...'); ?>">
-                            <?php foreach ($ev_m['turni'] as $t_m): ?>
-                                <option value="<?php echo $t_m['id']; ?>" <?php echo $filtro_turno == $t_m['id'] ? 'selected' : ''; ?>>
-                                    📅 <?php echo date('d/m/Y', strtotime($t_m['data_turno'])); ?> (Ore <?php echo substr($t_m['orario_inizio'],0,5); ?>)
-                                </option>
-                            <?php endforeach; ?>
-                        </optgroup>
-                    <?php endforeach; ?>
-                </select>
-
-                <select name="f_stato" class="form-select form-select-sm fw-bold border-info text-dark shadow-sm" onchange="document.getElementById('formFiltroTurno').submit();" style="max-width: 180px;">
-                    <option value="">Tutti gli Stati</option>
-                    <option value="confermata" <?php echo $filtro_stato === 'confermata' ? 'selected' : ''; ?>>✅ Confermata</option>
-                    <option value="in_attesa" <?php echo $filtro_stato === 'in_attesa' ? 'selected' : ''; ?>>🕒 In Attesa</option>
-                    <option value="da_approvare" <?php echo $filtro_stato === 'da_approvare' ? 'selected' : ''; ?>>⏳ Da Approvare</option>
-                    <option value="annullata" <?php echo $filtro_stato === 'annullata' ? 'selected' : ''; ?>>🚫 Annullata</option>
-                    <option value="rifiutata" <?php echo $filtro_stato === 'rifiutata' ? 'selected' : ''; ?>>❌ Rifiutata</option>
-                </select>
-
-                <div class="d-flex align-items-center gap-1">
-                    <i class="fa fa-calendar-alt text-secondary" title="Range date turno"></i>
-                    <input type="date" name="f_data_da" class="form-control form-control-sm" style="max-width:140px;" value="<?php echo htmlspecialchars($filtro_data_da); ?>" title="Data turno dal">
-                    <span class="text-muted small">—</span>
-                    <input type="date" name="f_data_fine" class="form-control form-control-sm" style="max-width:140px;" value="<?php echo htmlspecialchars($filtro_data_fine); ?>" title="Data turno al">
-                    <button type="submit" class="btn btn-outline-primary btn-sm" title="Applica filtro date"><i class="fa fa-calendar-check"></i></button>
-                    <?php if (!empty($filtro_data_da) || !empty($filtro_data_fine)): ?>
-                        <a href="iscritti.php?p_id=<?php echo $filtro_p; ?>&f_turno=<?php echo $filtro_turno; ?>&f_stato=<?php echo urlencode($filtro_stato); ?>&f_cerca=<?php echo urlencode($filtro_cerca); ?><?php echo $is_archivio ? '&archivio=1' : ''; ?>" class="btn btn-outline-danger btn-sm" title="Cancella filtro date"><i class="fa fa-times"></i></a>
-                    <?php endif; ?>
-                </div>
-
-                <div class="input-group input-group-sm" style="max-width: 240px;">
-                    <input type="text" name="f_cerca" class="form-control form-control-sm" placeholder="Nome, email, codice..." value="<?php echo htmlspecialchars($filtro_cerca); ?>">
-                    <button type="submit" class="btn btn-outline-secondary btn-sm"><i class="fa fa-search"></i></button>
-                    <?php if (!empty($filtro_cerca)): ?>
-                        <a href="iscritti.php?p_id=<?php echo $filtro_p; ?>&f_turno=<?php echo $filtro_turno; ?>&f_stato=<?php echo urlencode($filtro_stato); ?><?php echo $url_suffix; ?>" class="btn btn-outline-danger btn-sm" title="Cancella ricerca"><i class="fa fa-times"></i></a>
-                    <?php endif; ?>
-                </div>
-            </form>
-
-            <div class="d-flex gap-2">
-                <?php if (!$is_archivio): ?>
-                    <button type="button" class="btn btn-warning btn-sm fw-bold text-dark shadow-sm" data-bs-toggle="modal" data-bs-target="#modMailMassiva">
-                        <i class="fa fa-paper-plane me-1"></i> Invia Mail agli Iscritti
-                    </button>
-                <?php endif; ?>
-
-                <form method="POST" class="m-0 d-flex gap-2">
-                    <?php csrf_field(); ?>
-                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                    <?php if ($is_archivio): ?><input type="hidden" name="archivio" value="1"><?php endif; ?>
-                    <input type="hidden" name="f_turno_export" value="<?php echo $filtro_turno; ?>">
-                    <input type="hidden" name="f_stato_export" value="<?php echo htmlspecialchars($filtro_stato); ?>">
-                    <input type="hidden" name="f_data_da_export" value="<?php echo htmlspecialchars($filtro_data_da); ?>">
-                    <input type="hidden" name="f_data_fine_export" value="<?php echo htmlspecialchars($filtro_data_fine); ?>">
-                    <button type="submit" name="export_xls" class="btn btn-success btn-sm fw-bold shadow-sm" title="Esporta solo la selezione attuale"><i class="fa fa-file-excel me-1"></i> Excel</button>
-                    <button type="submit" name="export_csv" class="btn btn-secondary btn-sm fw-bold shadow-sm" title="Esporta solo la selezione attuale"><i class="fa fa-file-csv me-1"></i> CSV</button>
-                </form>
-            </div>
-        </div>
+            <button type="submit" class="btn btn-sm fw-bold text-white" style="background:<?php echo $col_area_i; ?>;border-radius:8px;border:none;"><i class="fa fa-filter me-1"></i>Filtra</button>
+            <?php if (!empty($filtro_cerca) || !empty($filtro_stato) || $filtro_turno > 0 || !empty($filtro_data_da) || !empty($filtro_data_fine)): ?>
+                <a href="iscritti.php?p_id=<?php echo $filtro_p; ?><?php echo $is_archivio ? '&archivio=1' : ''; ?>" class="btn btn-sm btn-outline-danger fw-bold" style="border-radius:8px;" title="Azzera filtri"><i class="fa fa-times me-1"></i>Reset</a>
+            <?php endif; ?>
+        </form>
     </div>
 
-    <div class="card-body p-3">
-        <div class="table-responsive">
-            <table id="tabellaIscritti" class="table table-hover align-middle w-100">
-                <thead class="table-dark">
-                    <tr><th>Codice</th><th>Stato</th><th>Presenza</th><th>Partecipante</th><th>Posti</th><th>Matricola</th><th>Email</th><th>Attività / Turno</th><th>Data Reg.</th><th class="text-end">Azione</th></tr>
-                </thead>
-                <tbody>
-                    <?php if(!empty($prenotazioni)): ?>
-                        <?php foreach($prenotazioni as $pr): ?>
-                            <?php 
-                                $json_c = json_decode($pr['dati_custom_json'] ?? '', true) ?: []; 
-                                $st_val = $pr['stato'] ?? 'confermata';
-                                $ev_chk_attivo = (int)($pr['abilita_presenze'] ?? 1);
-                            ?>
-                            <tr class="<?php echo ($st_val === 'in_attesa') ? 'table-warning' : (($st_val === 'da_approvare') ? 'table-info' : (($st_val === 'rifiutata' || $st_val === 'annullata') ? 'table-secondary text-muted' : '')); ?>">
-                                <td><span class="badge bg-dark fw-bold fs-6"><?php echo $pr['codice_prenotazione']; ?></span></td>
-                                
-                                <td>
-                                    <?php if($st_val === 'in_attesa'): ?>
-                                        <span class="badge bg-warning text-dark border border-warning shadow-sm"><i class="fa fa-clock me-1"></i> In Attesa</span>
-                                    <?php elseif($st_val === 'da_approvare'): ?>
-                                        <span class="badge bg-info text-dark border border-info shadow-sm"><i class="fa fa-hourglass-half me-1"></i> Da Approvare</span>
-                                    <?php elseif($st_val === 'annullata'): ?>
-                                        <span class="badge bg-dark shadow-sm"><i class="fa fa-ban me-1"></i> Annullata</span>
-                                    <?php elseif($st_val === 'rifiutata'): ?>
-                                        <span class="badge bg-secondary shadow-sm"><i class="fa fa-times me-1"></i> Rifiutata</span>
-                                    <?php else: ?>
-                                        <span class="badge bg-success shadow-sm"><i class="fa fa-check me-1"></i> Confermata</span>
+    <!-- TABELLA -->
+    <div class="table-responsive">
+        <table id="tabellaIscritti" class="table isc-table align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>Partecipante</th>
+                    <th>Evento / Turno</th>
+                    <th>Stato</th>
+                    <th>Presenza</th>
+                    <th style="font-size:.65rem;color:#64748b;">Registrato</th>
+                    <th class="text-end">Azioni</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php if(!empty($prenotazioni)): ?>
+                <?php foreach($prenotazioni as $pr):
+                    $json_c = json_decode($pr['dati_custom_json'] ?? '', true) ?: [];
+                    $st_val = $pr['stato'] ?? 'confermata';
+                    $ev_chk_attivo = (int)($pr['abilita_presenze'] ?? 1);
+                    $is_presente = (int)($pr['presente'] ?? 0) === 1;
+                    $initials = strtoupper(substr($pr['nome'] ?? 'U', 0, 1) . substr($pr['cognome'] ?? '', 0, 1));
+
+                    // Colori avatar e stato
+                    if (in_array($st_val, ['confermata','confermato','confirmed'])) {
+                        $av_bg='#16a34a'; $st_bg='#dcfce7'; $st_tc='#166534'; $st_icon='fa-check'; $st_lbl='Confermata';
+                    } elseif ($st_val === 'in_attesa' || $st_val === 'pending') {
+                        $av_bg='#d97706'; $st_bg='#fef3c7'; $st_tc='#92400e'; $st_icon='fa-clock'; $st_lbl='In attesa';
+                    } elseif ($st_val === 'da_approvare') {
+                        $av_bg='#0891b2'; $st_bg='#e0f2fe'; $st_tc='#0c4a6e'; $st_icon='fa-hourglass-half'; $st_lbl='Da approvare';
+                    } elseif ($st_val === 'annullata' || $st_val === 'annullato') {
+                        $av_bg='#64748b'; $st_bg='#f1f5f9'; $st_tc='#334155'; $st_icon='fa-ban'; $st_lbl='Annullata';
+                    } elseif ($st_val === 'rifiutata') {
+                        $av_bg='#dc2626'; $st_bg='#fee2e2'; $st_tc='#991b1b'; $st_icon='fa-times'; $st_lbl='Rifiutata';
+                    } else {
+                        $av_bg='#475569'; $st_bg='#f1f5f9'; $st_tc='#334155'; $st_icon='fa-question'; $st_lbl=htmlspecialchars($st_val);
+                    }
+                    $row_opacity = in_array($st_val, ['annullata','rifiutata']) ? 'opacity:0.6;' : '';
+                ?>
+                <tr style="<?php echo $row_opacity; ?>">
+                    <!-- Partecipante -->
+                    <td>
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="avatar-circle" style="background:<?php echo $av_bg; ?>;"><?php echo $initials; ?></div>
+                            <div>
+                                <div class="fw-semibold text-dark" style="font-size:.85rem;"><?php echo htmlspecialchars($pr['nome'] . ' ' . $pr['cognome']); ?></div>
+                                <div class="text-muted" style="font-size:.72rem;"><?php echo htmlspecialchars($pr['email']); ?></div>
+                                <div class="d-flex gap-1 mt-1 flex-wrap">
+                                    <code style="font-size:.65rem;background:#f1f5f9;padding:1px 5px;border-radius:4px;color:#334155;"><?php echo $pr['codice_prenotazione']; ?></code>
+                                    <?php if (!empty($pr['matricola_effettiva'])): ?>
+                                        <span style="font-size:.65rem;background:#ede9fe;color:#5b21b6;padding:1px 5px;border-radius:4px;"><?php echo htmlspecialchars($pr['matricola_effettiva']); ?></span>
                                     <?php endif; ?>
-                                </td>
-
-                                <td class="text-center">
-                                    <?php if ($is_archivio): ?>
-                                        <?php if (($pr['presente'] ?? 0) == 1): ?>
-                                            <span class="badge bg-success shadow-sm"><i class="fa fa-check me-1"></i> Presente</span>
-                                        <?php else: ?>
-                                            <span class="badge bg-light text-muted border shadow-sm"><i class="fa fa-minus me-1"></i> Assente</span>
-                                        <?php endif; ?>
-                                    <?php else: ?>
-                                        <?php if($ev_chk_attivo === 1): ?>
-                                            <?php if (($pr['presente'] ?? 0) == 1): ?>
-                                                <form method="POST" class="d-inline">
-                                                    <?php csrf_field(); ?>
-                                                    <input type="hidden" name="toggle_presenza" value="<?php echo $pr['id']; ?>">
-                                                    <input type="hidden" name="val" value="0">
-                                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                    <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
-                                                    <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
-                                                    <button type="submit" class="badge bg-success border-0 shadow-sm" title="Clicca per rimuovere la presenza" style="cursor:pointer;"><i class="fa fa-check me-1"></i> Presente</button>
-                                                </form>
-                                            <?php else: ?>
-                                                <form method="POST" class="d-inline">
-                                                    <?php csrf_field(); ?>
-                                                    <input type="hidden" name="toggle_presenza" value="<?php echo $pr['id']; ?>">
-                                                    <input type="hidden" name="val" value="1">
-                                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                    <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
-                                                    <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
-                                                    <button type="submit" class="badge bg-light text-muted border shadow-sm" title="Clicca per segnare come presente" style="cursor:pointer;"><i class="fa fa-minus me-1"></i> Assente</button>
-                                                </form>
-                                            <?php endif; ?>
-                                        <?php else: ?>
-                                            <span class="badge bg-light text-muted" title="Check-in non richiesto per questo evento">- N/A -</span>
-                                        <?php endif; ?>
+                                    <?php if (($pr['num_posti'] ?? 1) > 1): ?>
+                                        <span style="font-size:.65rem;background:#fef3c7;color:#92400e;padding:1px 5px;border-radius:4px;"><?php echo $pr['num_posti']; ?> posti</span>
                                     <?php endif; ?>
-                                </td>
+                                </div>
+                            </div>
+                        </div>
+                    </td>
 
-                                <td><strong><?php echo htmlspecialchars($pr['nome'] . ' ' . $pr['cognome']); ?></strong></td>
-                                <td><span class="badge bg-secondary"><?php echo $pr['num_posti'] ?? 1; ?></span></td>
-                                <td><span class="badge bg-light text-dark border font-monospace"><?php echo htmlspecialchars($pr['matricola_effettiva'] ?: 'N/D'); ?></span></td>
-                                <td><div style="word-break: break-all; max-width: 180px; font-size: 0.85rem;"><?php echo htmlspecialchars($pr['email']); ?></div></td>
-                                <td><div style="max-width: 250px;"><strong><?php echo htmlspecialchars($pr['evento_titolo']); ?></strong><br><small class="text-secondary">📅 <?php echo date('d/m/Y', strtotime($pr['data_turno'])); ?> - ore <?php echo substr($pr['orario_inizio'],0,5); ?></small></div></td>
-                                <td><small><?php echo date('Y/m/d H:i', strtotime($pr['data_prenotazione'])); ?></small></td>
-                                
-                                <td class="text-end">
-                                    <div class="d-flex flex-wrap justify-content-end gap-1" style="max-width: 140px; margin-left: auto;">
-                                        
-                                        <a href="../stampa_ricevuta.php?code=<?php echo urlencode($pr['codice_prenotazione']); ?>" target="_blank" class="btn btn-outline-dark btn-sm fw-bold" title="Stampa Ricevuta PDF">
-                                            <i class="fa fa-file-pdf"></i>
-                                        </a>
-                                        
-                                        <?php if ($ev_chk_attivo === 1 && (int)($pr['presente'] ?? 0) === 1 && $st_val === 'confermata'): ?>
-                                            <a href="../stampa_attestato.php?code=<?php echo urlencode($pr['codice_prenotazione']); ?>" target="_blank" class="btn btn-success btn-sm fw-bold shadow-sm" title="Stampa Attestato PDF">
-                                                <i class="fa fa-graduation-cap"></i>
-                                            </a>
-                                        <?php endif; ?>
-                                        
-                                        <?php if (!$is_archivio): ?>
-                                            <?php if($st_val === 'da_approvare'): ?>
-                                                <form method="POST" class="d-inline">
-                                                    <?php csrf_field(); ?>
-                                                    <input type="hidden" name="approva_pren" value="<?php echo $pr['id']; ?>">
-                                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                    <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
-                                                    <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
-                                                    <button type="submit" class="btn btn-success btn-sm fw-bold" data-confirm="Approvare questa prenotazione? Verrà inviata un\'email di conferma all\'utente." title="Approva"><i class="fa fa-check"></i></button>
-                                                </form>
-                                                <form method="POST" class="d-inline">
-                                                    <?php csrf_field(); ?>
-                                                    <input type="hidden" name="rifiuta_pren" value="<?php echo $pr['id']; ?>">
-                                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                    <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
-                                                    <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
-                                                    <button type="submit" class="btn btn-warning btn-sm text-dark fw-bold" data-confirm="Rifiutare questa prenotazione? L\'utente riceverà una mail di avviso." title="Rifiuta"><i class="fa fa-times"></i></button>
-                                                </form>
-                                            <?php endif; ?>
-                                            
-                                            <?php if(!empty($pr['email'])): ?>
-                                                <button type="button" class="btn btn-outline-primary btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#modChat<?php echo $pr['id']; ?>" title="Chat / Messaggi">
-                                                    <i class="fa fa-comments"></i>
-                                                </button>
-                                            <?php endif; ?>
+                    <!-- Evento / Turno -->
+                    <td>
+                        <div class="fw-semibold text-dark" style="font-size:.82rem;max-width:200px;" title="<?php echo htmlspecialchars($pr['evento_titolo']); ?>"><?php echo htmlspecialchars(mb_strimwidth($pr['evento_titolo'], 0, 35, '…')); ?></div>
+                        <div class="text-muted mt-1" style="font-size:.72rem;"><i class="fa fa-calendar me-1"></i><?php echo htmlspecialchars(etichetta_turno($pr)); ?></div>
+                    </td>
 
-                                            <button type="button" class="btn btn-outline-info btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#modEditPren<?php echo $pr['id']; ?>" title="Dettagli">
-                                                <i class="fa fa-search-plus"></i>
-                                            </button>
-                                            
-                                            <form method="POST" class="d-inline">
-                                                <?php csrf_field(); ?>
-                                                <input type="hidden" name="annulla_pren" value="<?php echo $pr['id']; ?>">
-                                                <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
-                                                <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
-                                                <button type="submit" class="btn btn-outline-warning btn-sm text-dark fw-bold" data-confirm="Vuoi annullare questa prenotazione? Il posto verrà liberato ma i dati dell\'utente resteranno in tabella." title="Annulla Prenotazione (Mantieni Traccia)"><i class="fa fa-ban"></i></button>
-                                            </form>
-                                            <form method="POST" class="d-inline">
-                                                <?php csrf_field(); ?>
-                                                <input type="hidden" name="del_pren" value="<?php echo $pr['id']; ?>">
-                                                <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
-                                                <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
-                                                <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
-                                                <button type="submit" class="btn btn-outline-danger btn-sm" data-confirm="Cancellare definitivamente la prenotazione?" title="Elimina Definitivamente"><i class="fa fa-trash"></i></button>
-                                            </form>
-                                        <?php endif; ?>
-                                    </div>
-                                </td>
-                            </tr>
+                    <!-- Stato -->
+                    <td>
+                        <span class="stato-badge" style="background:<?php echo $st_bg; ?>;color:<?php echo $st_tc; ?>;"><i class="fa <?php echo $st_icon; ?>"></i><?php echo $st_lbl; ?></span>
+                    </td>
 
-                            <?php if (!$is_archivio && !empty($pr['email'])): ?>
+                    <!-- Presenza -->
+                    <td>
+                        <?php if ($is_archivio): ?>
+                            <?php if ($is_presente): ?>
+                                <span class="stato-badge" style="background:#dcfce7;color:#166534;"><i class="fa fa-check"></i>Presente</span>
+                            <?php else: ?>
+                                <span class="stato-badge" style="background:#f1f5f9;color:#64748b;"><i class="fa fa-minus"></i>Assente</span>
+                            <?php endif; ?>
+                        <?php elseif ($ev_chk_attivo === 1): ?>
+                            <form method="POST" class="d-inline">
+                                <?php csrf_field(); ?>
+                                <input type="hidden" name="toggle_presenza" value="<?php echo $pr['id']; ?>">
+                                <input type="hidden" name="val" value="<?php echo $is_presente ? '0' : '1'; ?>">
+                                <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
+                                <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
+                                <?php if ($is_presente): ?>
+                                    <button type="submit" class="presenza-btn" style="background:#dcfce7;color:#166534;" title="Clicca per rimuovere la presenza"><i class="fa fa-check"></i>Presente</button>
+                                <?php else: ?>
+                                    <button type="submit" class="presenza-btn" style="background:#f1f5f9;color:#64748b;" title="Clicca per segnare presente"><i class="fa fa-minus"></i>Assente</button>
+                                <?php endif; ?>
+                            </form>
+                        <?php else: ?>
+                            <span class="text-muted" style="font-size:.72rem;">N/A</span>
+                        <?php endif; ?>
+                    </td>
+
+                    <!-- Data registrazione -->
+                    <td style="font-size:.72rem;color:#94a3b8;white-space:nowrap;"><?php echo date('d/m/y H:i', strtotime($pr['data_prenotazione'])); ?></td>
+
+                    <!-- Azioni -->
+                    <td>
+                        <div class="d-flex gap-1 justify-content-end flex-wrap">
+                            <a href="../stampa_ricevuta.php?code=<?php echo urlencode($pr['codice_prenotazione']); ?>" target="_blank" class="act-btn" title="Ricevuta PDF"><i class="fa fa-file-pdf"></i></a>
+                            <?php if ($ev_chk_attivo === 1 && $is_presente && $st_val === 'confermata'): ?>
+                                <a href="../stampa_attestato.php?code=<?php echo urlencode($pr['codice_prenotazione']); ?>" target="_blank" class="act-btn green" title="Attestato PDF"><i class="fa fa-graduation-cap"></i></a>
+                            <?php endif; ?>
+                            <?php if (!$is_archivio): ?>
+                                <?php if ($st_val === 'da_approvare'): ?>
+                                    <form method="POST" class="d-inline">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="approva_pren" value="<?php echo $pr['id']; ?>">
+                                        <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                        <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
+                                        <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
+                                        <button type="submit" class="act-btn green" data-confirm="Approvare questa prenotazione?" title="Approva"><i class="fa fa-check"></i></button>
+                                    </form>
+                                    <form method="POST" class="d-inline">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="rifiuta_pren" value="<?php echo $pr['id']; ?>">
+                                        <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                        <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
+                                        <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
+                                        <button type="submit" class="act-btn orange" data-confirm="Rifiutare questa prenotazione?" title="Rifiuta"><i class="fa fa-times"></i></button>
+                                    </form>
+                                <?php endif; ?>
+                                <?php if (!empty($pr['email'])): ?>
+                                    <button type="button" class="act-btn blue" data-bs-toggle="modal" data-bs-target="#modChat<?php echo $pr['id']; ?>" title="Chat / Messaggi"><i class="fa fa-comments"></i></button>
+                                <?php endif; ?>
+                                <button type="button" class="act-btn" data-bs-toggle="modal" data-bs-target="#modEditPren<?php echo $pr['id']; ?>" title="Dettagli / Modifica"><i class="fa fa-edit"></i></button>
+                                <form method="POST" class="d-inline">
+                                    <?php csrf_field(); ?>
+                                    <input type="hidden" name="annulla_pren" value="<?php echo $pr['id']; ?>">
+                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                    <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
+                                    <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
+                                    <button type="submit" class="act-btn orange" data-confirm="Annullare questa prenotazione?" title="Annulla"><i class="fa fa-ban"></i></button>
+                                </form>
+                                <form method="POST" class="d-inline">
+                                    <?php csrf_field(); ?>
+                                    <input type="hidden" name="del_pren" value="<?php echo $pr['id']; ?>">
+                                    <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
+                                    <input type="hidden" name="f_turno" value="<?php echo $filtro_turno; ?>">
+                                    <input type="hidden" name="f_stato" value="<?php echo htmlspecialchars($filtro_stato); ?>">
+                                    <button type="submit" class="act-btn red" data-confirm="Cancellare definitivamente la prenotazione?" title="Elimina"><i class="fa fa-trash"></i></button>
+                                </form>
+                            <?php endif; ?>
+                        </div>
+                    </td>
+                </tr>
+
+                <?php if (!$is_archivio && !empty($pr['email'])): ?>
                             <!-- MODALE CHAT / MESSAGGI (Solo Attivi) -->
                             <div class="modal fade" id="modChat<?php echo $pr['id']; ?>" tabindex="-1">
                                 <div class="modal-dialog modal-lg">
@@ -700,10 +738,7 @@ $messaggi_per_pr = get_messaggi_per_prenotazioni($conn, $pr_ids);
                                                             if ($ev_m['id'] == $pr['evento_id']) {
                                                                 foreach ($ev_m['turni'] as $t_m) {
                                                                     $sel = ($t_m['id'] == $pr['turno_id']) ? 'selected' : '';
-                                                                    $d_t = date('d/m/Y', strtotime($t_m['data_turno']));
-                                                                    $o_i = substr($t_m['orario_inizio'],0,5);
-                                                                    $o_f = substr($t_m['orario_fine'],0,5);
-                                                                    echo "<option value='{$t_m['id']}' $sel>📅 $d_t (Ore $o_i - $o_f)</option>";
+                                                                    echo "<option value='{$t_m['id']}' $sel>📅 " . htmlspecialchars(etichetta_turno($t_m)) . "</option>";
                                                                 }
                                                             }
                                                         }
@@ -732,9 +767,8 @@ $messaggi_per_pr = get_messaggi_per_prenotazioni($conn, $pr_ids);
                 </tbody>
             </table>
         </div>
-    </div>
     <?php if ($total_pages > 1): ?>
-    <div class="card-footer bg-white border-top d-flex justify-content-between align-items-center py-2 px-3 flex-wrap gap-2">
+    <div class="d-flex justify-content-between align-items-center py-2 px-3 flex-wrap gap-2 border-top bg-white">
         <small class="text-muted">
             <?php echo number_format($total_count); ?> iscritti &mdash; pagina <?php echo $page; ?> di <?php echo $total_pages; ?>
         </small>
@@ -839,18 +873,33 @@ $messaggi_per_pr = get_messaggi_per_prenotazioni($conn, $pr_ids);
                             <?php foreach ($tutti_gli_eventi as $ev_m): ?>
                                 <?php foreach ($ev_m['turni'] as $t_m): ?>
                                     <option value="<?php echo $t_m['id']; ?>">
-                                        🎯 <?php echo htmlspecialchars($ev_m['titolo']); ?> — 📅 <?php echo date('d/m/Y', strtotime($t_m['data_turno'])); ?> (Ore <?php echo substr($t_m['orario_inizio'],0,5); ?>)
+                                        <?php echo htmlspecialchars($ev_m['titolo'] . ' — ' . etichetta_turno($t_m)); ?>
                                     </option>
                                 <?php endforeach; ?>
                             <?php endforeach; ?>
                         </select>
                     </div>
+
+                    <!-- CERCA UTENTE REGISTRATO -->
+                    <div class="mb-3 p-3 rounded" style="background:#f0f7ff;border:1px dashed #93c5fd;">
+                        <label class="form-label small fw-bold text-primary"><i class="fa fa-search me-1"></i>Cerca utente registrato (opzionale)</label>
+                        <div class="position-relative">
+                            <input type="text" id="cercaUtenteInput" class="form-control form-control-sm" placeholder="Scrivi nome, cognome, email o matricola..." autocomplete="off">
+                            <div id="cercaUtenteDropdown" class="position-absolute w-100 bg-white border rounded shadow-sm d-none" style="z-index:9999;max-height:200px;overflow-y:auto;top:100%;left:0;"></div>
+                        </div>
+                        <div id="utenteSceltoInfo" class="d-none mt-2 d-flex align-items-center gap-2 p-2 rounded" style="background:#dbeafe;">
+                            <i class="fa fa-user-check text-primary"></i>
+                            <span id="utenteSceltoNome" class="fw-semibold text-primary small"></span>
+                            <button type="button" class="btn-close ms-auto" id="btnSvuotaUtente" style="font-size:.65rem;" title="Deseleziona utente"></button>
+                        </div>
+                    </div>
+
                     <div class="row g-2 mb-3">
-                        <div class="col-md-4"><label class="form-label small fw-bold">Nome Utente</label><input type="text" name="nome" class="form-control form-control-sm" required placeholder="Es. Mario"></div>
-                        <div class="col-md-4"><label class="form-label small fw-bold">Cognome Utente</label><input type="text" name="cognome" class="form-control form-control-sm" required placeholder="Es. Rossi"></div>
+                        <div class="col-md-4"><label class="form-label small fw-bold">Nome</label><input type="text" id="manNome" name="nome" class="form-control form-control-sm" required placeholder="Es. Mario"></div>
+                        <div class="col-md-4"><label class="form-label small fw-bold">Cognome</label><input type="text" id="manCognome" name="cognome" class="form-control form-control-sm" required placeholder="Es. Rossi"></div>
                         <div class="col-md-4"><label class="form-label small fw-bold">Numero Posti</label><input type="number" name="num_posti" class="form-control form-control-sm" value="1" min="1" required></div>
-                        <div class="col-md-6"><label class="form-label small fw-bold">Email Utente</label><input type="email" name="email" class="form-control form-control-sm" required placeholder="mario.rossi@unical.it"></div>
-                        <div class="col-md-6"><label class="form-label small fw-bold">Matricola (Opzionale)</label><input type="text" name="matricola" class="form-control form-control-sm" placeholder="Es. 210000"></div>
+                        <div class="col-md-6"><label class="form-label small fw-bold">Email</label><input type="email" id="manEmail" name="email" class="form-control form-control-sm" required placeholder="mario.rossi@unical.it"></div>
+                        <div class="col-md-6"><label class="form-label small fw-bold">Matricola (Opzionale)</label><input type="text" id="manMatricola" name="matricola" class="form-control form-control-sm" placeholder="Es. 210000"></div>
                     </div>
                 </div>
                 <div class="modal-footer py-2">
@@ -930,8 +979,82 @@ document.addEventListener('DOMContentLoaded', function() {
         paging:  false,
         info:    false,
         language: { url: '//cdn.datatables.net/plug-ins/1.13.6/i18n/it-IT.json' },
-        order: [[8, "desc"]],
-        columnDefs: [ { orderable: false, targets: 9 } ]
+        order: [[4, "desc"]],
+        columnDefs: [ { orderable: false, targets: 5 } ]
+    });
+
+    // --- AUTOCOMPLETE UTENTE REGISTRATO nel modale prenotazione manuale ---
+    var cercaTimer = null;
+    var cercaInput = document.getElementById('cercaUtenteInput');
+    var dropdown   = document.getElementById('cercaUtenteDropdown');
+    var infoBox    = document.getElementById('utenteSceltoInfo');
+    var infoNome   = document.getElementById('utenteSceltoNome');
+
+    if (!cercaInput) return;
+
+    cercaInput.addEventListener('input', function() {
+        clearTimeout(cercaTimer);
+        var q = this.value.trim();
+        if (q.length < 2) { dropdown.classList.add('d-none'); dropdown.innerHTML = ''; return; }
+        cercaTimer = setTimeout(function() {
+            fetch('iscritti.php?ajax_cerca_utenti=1&q=' + encodeURIComponent(q))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    dropdown.innerHTML = '';
+                    if (!data.length) {
+                        dropdown.innerHTML = '<div class="px-3 py-2 text-muted small">Nessun utente trovato</div>';
+                        dropdown.classList.remove('d-none');
+                        return;
+                    }
+                    data.forEach(function(u) {
+                        var item = document.createElement('div');
+                        item.className = 'px-3 py-2 border-bottom';
+                        item.style.cursor = 'pointer';
+                        item.style.fontSize = '.82rem';
+                        item.innerHTML = '<strong>' + u.cognome + ' ' + u.nome + '</strong>'
+                            + '<span class="text-muted ms-2">' + u.email + '</span>'
+                            + (u.matricola ? '<span class="ms-2 badge" style="background:#ede9fe;color:#5b21b6;">' + u.matricola + '</span>' : '');
+                        item.addEventListener('mouseenter', function() { this.style.background = '#f0f7ff'; });
+                        item.addEventListener('mouseleave', function() { this.style.background = ''; });
+                        item.addEventListener('click', function() {
+                            document.getElementById('manNome').value      = u.nome;
+                            document.getElementById('manCognome').value   = u.cognome;
+                            document.getElementById('manEmail').value     = u.email;
+                            document.getElementById('manMatricola').value = u.matricola || '';
+                            infoNome.textContent = u.cognome + ' ' + u.nome + ' — ' + u.email;
+                            infoBox.classList.remove('d-none');
+                            dropdown.classList.add('d-none');
+                            cercaInput.value = '';
+                        });
+                        dropdown.appendChild(item);
+                    });
+                    dropdown.classList.remove('d-none');
+                });
+        }, 280);
+    });
+
+    document.addEventListener('click', function(e) {
+        if (!cercaInput.contains(e.target) && !dropdown.contains(e.target)) {
+            dropdown.classList.add('d-none');
+        }
+    });
+
+    var btnSvuota = document.getElementById('btnSvuotaUtente');
+    if (btnSvuota) {
+        btnSvuota.addEventListener('click', function() {
+            document.getElementById('manNome').value      = '';
+            document.getElementById('manCognome').value   = '';
+            document.getElementById('manEmail').value     = '';
+            document.getElementById('manMatricola').value = '';
+            infoBox.classList.add('d-none');
+        });
+    }
+
+    // Reset modale alla chiusura
+    document.getElementById('modPrenotazioneManuale').addEventListener('hidden.bs.modal', function() {
+        dropdown.classList.add('d-none');
+        infoBox.classList.add('d-none');
+        cercaInput.value = '';
     });
 });
 </script>

@@ -33,9 +33,14 @@ if ($t_id === 0 || empty($token)) {
     } else {
         $turno = $res_check->fetch_assoc();
 
-        $inizio_ts = strtotime($turno['data_turno'] . ' ' . $turno['orario_inizio']) - (30 * 60);
-        $fine_ts = strtotime($turno['data_turno'] . ' ' . $turno['orario_fine']);
         $now = time();
+        if (empty($turno['data_turno'])) {
+            // Turno identificato solo dal nome: il check-in resta sempre aperto
+            $inizio_ts = $now; $fine_ts = $now;
+        } else {
+            $inizio_ts = strtotime($turno['data_turno'] . ' ' . ($turno['orario_inizio'] ?: '00:00:00')) - (30 * 60);
+            $fine_ts = strtotime($turno['data_turno'] . ' ' . ($turno['orario_fine'] ?: '23:59:59'));
+        }
 
         if ($now < $inizio_ts) {
             $esito = "warning"; $colore = "warning"; $icona = "fa-clock";

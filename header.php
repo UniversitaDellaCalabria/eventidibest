@@ -291,11 +291,6 @@ if ($u_logged_header) {
                     <div class="it-header-center-content-wrapper align-items-center">
                         <div class="it-brand-wrapper">
                             <a href="/" class="text-decoration-none d-flex align-items-center" aria-label="Home page <?php echo htmlspecialchars($titolo_portale); ?>">
-                                <?php if (!empty($logo_url)): ?>
-                                    <img src="<?php echo htmlspecialchars($logo_url); ?>" alt="Logo <?php echo htmlspecialchars($titolo_portale); ?>" style="max-height: 75px; margin-right: 20px;">
-                                <?php else: ?>
-                                    <i class="fa fa-university text-white fs-1 me-3" aria-hidden="true"></i>
-                                <?php endif; ?>
                                 <div class="it-brand-text">
                                     <div class="it-brand-title" aria-hidden="true"><?php echo htmlspecialchars($titolo_portale); ?></div>
                                     <div class="it-brand-tagline d-none d-md-block" aria-hidden="true"><?php echo htmlspecialchars($sottotitolo_portale); ?></div>

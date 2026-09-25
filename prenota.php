@@ -67,7 +67,7 @@ $nomi_ruoli = [
                                             $disponibili = $t['max_posti'] - $posti_occ;
                                         ?>
                                         <option value="<?php echo $t['id']; ?>" <?php echo ($disponibili <= 0) ? 'disabled' : ''; ?>>
-                                            📅 <?php echo date('d/m/Y', strtotime($t['data_turno'])); ?> - 🕒 <?php echo substr($t['orario_inizio'], 0, 5); ?> (Disponibili: <?php echo $disponibili; ?>/<?php echo $t['max_posti']; ?>)
+                                            📅 <?php echo htmlspecialchars(etichetta_turno($t)); ?> (Disponibili: <?php echo $disponibili; ?>/<?php echo $t['max_posti']; ?>)
                                         </option>
                                     <?php endforeach; ?>
                                 </select>

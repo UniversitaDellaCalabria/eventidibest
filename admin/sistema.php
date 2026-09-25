@@ -22,7 +22,17 @@ function admin_redirect($url) {
 if (isset($_POST['run_reminders_manual'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Esecuzione Manuale Promemoria Email", ["Finestra_Ore" => 72]);
-    admin_redirect("../cron_reminders.php?manual=1"); 
+    admin_redirect("cron_reminders.php?manual=1");
+}
+
+// 1b. EMAIL DI PROVA: verifica la configurazione SMTP mostrando l'errore esatto del server
+if (isset($_POST['invia_email_test'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
+    $dest_test = trim($_POST['email_test'] ?? '');
+    $ok_test = inviaNotificaEmail($dest_test, "Email di prova - Eventi DiBEST", "<p>Questa è un'email di prova inviata dal pannello <strong>Sistema Email</strong> il " . date('d/m/Y H:i') . ".</p><p>Se la ricevi, la configurazione SMTP funziona.</p>", $conn);
+    if ($ok_test) flash_set("Email di prova accettata dal server per <strong>" . htmlspecialchars($dest_test) . "</strong>. Se non arriva entro qualche minuto controlla lo spam.");
+    else flash_set("Invio fallito: " . htmlspecialchars($GLOBALS['ultimo_errore_email'] ?: 'errore sconosciuto'), 'danger');
+    admin_redirect("sistema.php?p_id=$filtro_p#log-email");
 }
 
 // 2. SALVATAGGIO CONFIGURAZIONI SMTP E TEMPLATE
@@ -231,6 +241,59 @@ if (isset($_POST['save_system_settings'])) {
             </button>
         </div>
     </form>
+</div>
+
+<?php
+// Registro invii (tabella creata al primo invio da registra_log_email())
+$log_email = [];
+$stat_email = ['ok' => 0, 'ko' => 0];
+$res_log = @$conn->query("SELECT * FROM log_email ORDER BY id DESC LIMIT 100");
+if ($res_log) { while ($l = $res_log->fetch_assoc()) { $log_email[] = $l; } }
+$res_stat = @$conn->query("SELECT SUM(esito = 1) AS ok, SUM(esito = 0) AS ko FROM log_email WHERE created_at >= NOW() - INTERVAL 7 DAY");
+if ($res_stat && $s = $res_stat->fetch_assoc()) { $stat_email = ['ok' => (int)$s['ok'], 'ko' => (int)$s['ko']]; }
+$email_admin = '';
+$res_me = $conn->query("SELECT email FROM utenti WHERE id = " . (int)$u_id_curr . " LIMIT 1");
+if ($res_me && $me = $res_me->fetch_assoc()) { $email_admin = $me['email'] ?? ''; }
+?>
+<div class="card shadow-sm border-0 p-4 mt-4" id="log-email">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 border-bottom pb-3 mb-3">
+        <h5 class="fw-bold text-primary m-0"><i class="fa fa-list-alt me-1"></i> Verifica invio email</h5>
+        <form method="POST" class="d-flex gap-2 m-0">
+            <?php csrf_field(); ?>
+            <input type="email" name="email_test" class="form-control form-control-sm" style="min-width:240px" placeholder="destinatario@unical.it" value="<?php echo htmlspecialchars($email_admin); ?>" required>
+            <button type="submit" name="invia_email_test" class="btn btn-outline-primary btn-sm fw-bold text-nowrap"><i class="fa fa-paper-plane me-1"></i> Invia email di prova</button>
+        </form>
+    </div>
+    <p class="small text-muted mb-3">
+        Ultimi 7 giorni: <span class="badge bg-success"><?php echo $stat_email['ok']; ?> accettate</span>
+        <span class="badge bg-danger"><?php echo $stat_email['ko']; ?> fallite</span>.
+        "Accettata" significa che il server SMTP ha preso in carico il messaggio; se non arriva, il problema è a valle (spam, filtri della casella).
+    </p>
+    <?php if (empty($log_email)): ?>
+        <div class="text-muted small">Nessun invio registrato finora.</div>
+    <?php else: ?>
+        <div class="table-responsive" style="max-height:420px; overflow-y:auto;">
+            <table class="table table-sm table-hover align-middle small m-0">
+                <thead class="table-light" style="position:sticky; top:0;"><tr><th>Data</th><th>Destinatario</th><th>Oggetto</th><th>Esito</th></tr></thead>
+                <tbody>
+                <?php foreach ($log_email as $l): ?>
+                    <tr>
+                        <td class="text-nowrap"><?php echo date('d/m/Y H:i', strtotime($l['created_at'])); ?></td>
+                        <td><?php echo htmlspecialchars($l['destinatario']); ?></td>
+                        <td><?php echo htmlspecialchars($l['oggetto']); ?></td>
+                        <td>
+                            <?php if ((int)$l['esito'] === 1): ?>
+                                <span class="badge bg-success">Inviata</span><?php if ($l['canale'] === 'mail()'): ?> <span class="badge bg-warning text-dark" title="<?php echo htmlspecialchars($l['errore'] ?? ''); ?>">via mail()</span><?php endif; ?>
+                            <?php else: ?>
+                                <span class="badge bg-danger">Fallita</span> <span class="text-danger"><?php echo htmlspecialchars($l['errore'] ?? ''); ?></span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
 </div>
 
 <?php require_once 'admin_footer.php'; ?>
