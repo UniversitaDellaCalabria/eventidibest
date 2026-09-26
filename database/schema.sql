@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS `configurazione_portale` (
     `favicon_path`          varchar(255) DEFAULT '',
     `colore_menu_bg`        varchar(20)  DEFAULT '#1e293b',
     `colore_menu_testo`     varchar(20)  DEFAULT '#ffffff',
+    `widgets_home`          text         DEFAULT NULL,
+    `annuncio_home`         text         DEFAULT NULL,
+    `annuncio_colore`       varchar(20)  DEFAULT 'info',
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -84,6 +87,10 @@ CREATE TABLE IF NOT EXISTS `impostazioni_sistema` (
     `email_canc_admin_corpo`      text         DEFAULT NULL,
     `email_reminder_oggetto`      varchar(255) DEFAULT 'Promemoria Evento',
     `email_reminder_corpo`        text         DEFAULT NULL,
+    `email_attestato_oggetto`     varchar(255) DEFAULT '',
+    `email_attestato_corpo`       text         DEFAULT NULL,
+    `email_sondaggio_oggetto`     varchar(255) DEFAULT '',
+    `email_sondaggio_corpo`       text         DEFAULT NULL,
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -134,6 +141,13 @@ CREATE TABLE IF NOT EXISTS `pagine_eventi` (
     `ordine`                    int(11)      DEFAULT 0,
     `mostra_in_home`            tinyint(1)   NOT NULL DEFAULT 1,
     `limite_iscrizioni`         varchar(20)  NOT NULL DEFAULT 'nessuno',
+    `permessi_gestori_json`     text         DEFAULT NULL,
+    `firma_nome`                varchar(255) DEFAULT '',
+    `firma_titolo`              varchar(255) DEFAULT '',
+    `logo_attestato_path`       varchar(255) DEFAULT '',
+    `allegati_box_info`         text         DEFAULT NULL,
+    `allegati_sidebar`          text         DEFAULT NULL,
+    `copertina_path`            varchar(255) DEFAULT NULL,
     PRIMARY KEY (`id`),
     UNIQUE KEY `slug` (`slug`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -168,6 +182,8 @@ CREATE TABLE IF NOT EXISTS `eventi` (
     `ruolo_accesso_id`      int(11)      DEFAULT 0,
     `gestori_utenti_ids`    varchar(255) DEFAULT '',
     `permessi_gestori_json` text         DEFAULT NULL,
+    `email_notifiche_extra` text         DEFAULT NULL COMMENT 'indirizzi aggiuntivi per le notifiche delle prenotazioni (CSV)',
+    `allegato_pdf`          varchar(255) DEFAULT NULL,
     `ordine`                int(11)      DEFAULT 0,
     `archiviato`            tinyint(1)   DEFAULT 0,
     PRIMARY KEY (`id`)

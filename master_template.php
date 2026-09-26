@@ -174,6 +174,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
             $stmt_ins = $conn->prepare("INSERT INTO prenotazioni (turno_id, utente_id, codice_prenotazione, stato, num_posti, nome, cognome, email, matricola, dati_custom_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             $stmt_ins->bind_param("iississsss", $turno_id, $u_id_bind, $codice_p, $stato_prenotazione, $num_posti, $nome, $cognome, $email, $matricola, $json_custom_bind);
             $insert_ok = $stmt_ins->execute();
+            $nuovo_pr_id = (int)$stmt_ins->insert_id;
 
             if (!$insert_ok) {
                 throw new Exception($conn->error ?: 'Errore sconosciuto in fase di inserimento prenotazione');
@@ -219,16 +220,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
             
             inviaNotificaEmail($email, str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn, colore_area_turno($conn, $turno_id));
 
-            // Gestori dell'area + del singolo evento (anche quelli assegnati da Abilitazioni), se hanno le notifiche attive
-            $email_gestori = get_email_gestori_evento($conn, (int)$t_info['evento_id']);
-            if (!empty($email_gestori)) {
-                $stati_label = ['confermata' => 'Confermata', 'in_attesa' => "In lista d'attesa", 'da_approvare' => 'Da approvare'];
-                $obj_gest = "Nuova Registrazione ($num_posti posti): " . $t_info['evento_titolo'];
-                $body_gest = "<p>È stata registrata una nuova prenotazione per l'evento <strong>" . htmlspecialchars($t_info['evento_titolo']) . "</strong>.</p>"
-                           . "<p>👤 " . htmlspecialchars($nome . ' ' . $cognome) . "<br>📧 " . htmlspecialchars($email)
-                           . "<br>📅 " . htmlspecialchars($data_formatted ?: '-') . " | 🕒 " . htmlspecialchars($ora_formatted)
-                           . "<br>🎟️ " . htmlspecialchars($codice_p) . " — <strong>" . ($stati_label[$stato_prenotazione] ?? $stato_prenotazione) . "</strong></p>";
-                foreach ($email_gestori as $em_gest) { inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn, colore_area_turno($conn, $turno_id)); }
+            // Gestori dell'area/evento con notifiche attive + indirizzi aggiuntivi dell'evento:
+            // ognuno riceve la propria email con il riepilogo completo (campi aggiuntivi compresi)
+            $destinatari_notifica = get_destinatari_notifiche_prenotazione($conn, (int)$t_info['evento_id']);
+            $riepilogo = $destinatari_notifica ? html_riepilogo_prenotazione($conn, $nuovo_pr_id) : null;
+            if ($riepilogo) {
+                $obj_gest = "Nuova prenotazione ($num_posti " . ($num_posti === 1 ? 'posto' : 'posti') . "): " . $t_info['evento_titolo'];
+                $body_gest = "<p>È stata registrata una nuova prenotazione per l'evento <strong>" . htmlspecialchars($t_info['evento_titolo']) . "</strong>.</p>" . $riepilogo['html'];
+                foreach ($destinatari_notifica as $em_gest) { inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn, colore_area_turno($conn, $turno_id)); }
             }
 
             $param_stato = ($stato_prenotazione === 'in_attesa') ? "&st_tipo=attesa" : (($stato_prenotazione === 'da_approvare') ? "&st_tipo=approvare" : "");

@@ -241,10 +241,15 @@ if (isset($_GET['cancella_prenotazione'])) {
         $body_tpl = $sys_email['email_canc_utente_corpo'] ?: "<p>Gentile <strong>{NOME} {COGNOME}</strong>,</p><p>La tua prenotazione per l'evento <strong>{TITOLO_EVENTO}</strong> è stata cancellata con successo.</p>";
         inviaNotificaEmail($p_data['email'], str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn, colore_area_turno($conn, $p_data['turno_id']));
 
-        $obj_gest = "Avviso Disdetta: " . $p_data['evento_titolo'];
-        $body_gest = "<p>Gentile Gestore,</p><p>L'utente <strong>" . htmlspecialchars($p_data['nome'] . ' ' . $p_data['cognome']) . "</strong> ha appena <strong>annullato</strong> la sua prenotazione per l'evento <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong> del " . htmlspecialchars($data_formatted) . ".</p>";
-        foreach (get_email_gestori_evento($conn, (int)$p_data['evento_id']) as $em_gest) {
-            inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn, colore_area_turno($conn, $p_data['turno_id']));
+        // Gestori con notifiche attive + indirizzi aggiuntivi dell'evento, con il riepilogo completo
+        $destinatari_notifica = get_destinatari_notifiche_prenotazione($conn, (int)$p_data['evento_id']);
+        $riepilogo = $destinatari_notifica ? html_riepilogo_prenotazione($conn, $pr_id) : null;
+        if ($riepilogo) {
+            $obj_gest = "Disdetta: " . $p_data['evento_titolo'];
+            $body_gest = "<p><strong>" . htmlspecialchars($p_data['nome'] . ' ' . $p_data['cognome']) . "</strong> ha appena <strong>annullato</strong> la prenotazione per l'evento <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong>.</p>" . $riepilogo['html'];
+            foreach ($destinatari_notifica as $em_gest) {
+                inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn, colore_area_turno($conn, $p_data['turno_id']));
+            }
         }
 
         if ($was_confermata) {

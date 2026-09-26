@@ -82,16 +82,15 @@ $last_msgs = db_rows($conn,
 
 // Prossimi turni
 $next_events = db_rows($conn,
-    "SELECT e.titolo, t.data_turno, t.orario_inizio,
-            t.posti_totali, t.posti_rimanenti,
-            COUNT(p.id) as num_iscritti
+    "SELECT e.titolo, t.nome_turno, t.data_turno, t.orario_inizio,
+            t.max_posti AS posti_totali,
+            (SELECT COALESCE(SUM(p.num_posti), 0) FROM prenotazioni p
+              WHERE p.turno_id = t.id
+                AND IFNULL(p.stato, 'confermata') IN ('confermata', 'richiesta_conferma', 'da_approvare')) AS num_iscritti
      FROM turni t
      JOIN eventi e ON t.evento_id = e.id
-     LEFT JOIN prenotazioni p ON p.turno_id = t.id
-       AND p.stato NOT IN ('annullata','annullato','cancelled')
-     WHERE t.data_turno >= CURDATE()
+     WHERE t.data_turno >= CURDATE() AND e.archiviato = 0
        AND e.pagina_id = $filtro_p $sql_filtro_eventi_rbac
-     GROUP BY t.id
      ORDER BY t.data_turno ASC, t.orario_inizio ASC
      LIMIT 6"
 );
@@ -307,11 +306,11 @@ $kpi_defs = [
             <div class="turno-row">
                 <div class="flex-shrink-0 text-center" style="width:46px;">
                     <div class="fw-bold" style="font-size:.95rem;color:<?php echo $colore_area; ?>;"><?php echo date('d', strtotime($ev['data_turno'])); ?></div>
-                    <div style="font-size:.65rem;color:#94a3b8;text-transform:uppercase;"><?php echo date('M', strtotime($ev['data_turno'])); ?></div>
+                    <div style="font-size:.65rem;color:#94a3b8;text-transform:uppercase;"><?php echo ['', 'gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'][(int)date('n', strtotime($ev['data_turno']))]; ?></div>
                 </div>
                 <div class="flex-grow-1" style="min-width:0;">
-                    <div class="fw-semibold text-dark text-truncate" style="font-size:.83rem;"><?php echo htmlspecialchars($ev['titolo']); ?></div>
-                    <div style="font-size:.72rem;color:#64748b;"><i class="fa fa-clock me-1"></i><?php echo substr($ev['orario_inizio'], 0, 5); ?></div>
+                    <div class="fw-semibold text-dark text-truncate" style="font-size:.83rem;"><?php echo htmlspecialchars($ev['titolo'] . (!empty($ev['nome_turno']) ? ' · ' . $ev['nome_turno'] : '')); ?></div>
+                    <div style="font-size:.72rem;color:#64748b;"><i class="fa fa-clock me-1"></i><?php echo !empty($ev['orario_inizio']) ? substr($ev['orario_inizio'], 0, 5) : 'orario da definire'; ?></div>
                 </div>
                 <div class="flex-shrink-0 text-end" style="min-width:90px;">
                     <div style="font-size:.75rem;color:#475569;font-weight:600;"><?php echo $ev['num_iscritti']; ?> / <?php echo $max_p; ?></div>

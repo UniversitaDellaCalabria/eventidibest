@@ -429,6 +429,100 @@ if (!function_exists('get_email_gestori_evento')) {
     }
 }
 
+if (!function_exists('normalizza_lista_email')) {
+    // Testo libero (separatori: virgola, punto e virgola, spazi, a capo) -> indirizzi validi, minuscoli, senza doppioni.
+    // $scartati riceve gli indirizzi non validi, per poterli segnalare all'admin.
+    function normalizza_lista_email(?string $testo, int $max = 10, ?array &$scartati = null): array {
+        $scartati = [];
+        $validi = [];
+        foreach (preg_split('/[\s,;]+/', (string)$testo, -1, PREG_SPLIT_NO_EMPTY) as $e) {
+            $e = strtolower(trim($e));
+            if (filter_var($e, FILTER_VALIDATE_EMAIL)) $validi[$e] = true; else $scartati[] = $e;
+        }
+        return array_slice(array_keys($validi), 0, $max);
+    }
+}
+
+if (!function_exists('get_destinatari_notifiche_prenotazione')) {
+    // Chi riceve il riepilogo di prenotazioni e disdette: gestori con notifiche attive + indirizzi aggiuntivi dell'evento.
+    function get_destinatari_notifiche_prenotazione($conn, int $evento_id): array {
+        $dest = [];
+        foreach (get_email_gestori_evento($conn, $evento_id) as $e) $dest[strtolower(trim($e))] = true;
+        $res = $conn->query("SELECT email_notifiche_extra FROM eventi WHERE id = $evento_id LIMIT 1");
+        $extra = ($res && $r = $res->fetch_assoc()) ? (string)($r['email_notifiche_extra'] ?? '') : '';
+        foreach (normalizza_lista_email($extra) as $e) $dest[$e] = true;
+        return array_keys($dest);
+    }
+}
+
+if (!function_exists('html_riepilogo_prenotazione')) {
+    // Riepilogo completo di una prenotazione per le email a gestori e indirizzi aggiuntivi:
+    // dati anagrafici, evento e turno, stato, e TUTTI i campi aggiuntivi del form con la loro etichetta
+    // (gli allegati diventano link). Ritorna ['oggetto_evento' => titolo, 'html' => tabella] oppure null.
+    function html_riepilogo_prenotazione($conn, int $pr_id): ?array {
+        $res = $conn->query("SELECT pr.*, t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine,
+                                    e.id AS evento_id, e.titolo AS evento_titolo, e.luogo, e.pagina_id, pe.titolo AS area_titolo
+                             FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id
+                             JOIN pagine_eventi pe ON e.pagina_id = pe.id WHERE pr.id = $pr_id LIMIT 1");
+        $p = $res ? $res->fetch_assoc() : null;
+        if (!$p) return null;
+
+        $stati = ['confermata' => 'Confermata', 'in_attesa' => "In lista d'attesa", 'da_approvare' => 'Da approvare',
+                  'richiesta_conferma' => 'Posto offerto, da confermare', 'annullata' => 'Annullata', 'rifiutata' => 'Rifiutata', 'scaduta' => 'Scaduta'];
+        $righe = [
+            'Partecipante'      => trim($p['nome'] . ' ' . $p['cognome']),
+            'Email'             => $p['email'],
+            'Matricola'         => $p['matricola'] ?? '',
+            'Area'              => $p['area_titolo'],
+            'Evento'            => $p['evento_titolo'],
+            'Turno'             => etichetta_turno($p),
+            'Luogo'             => $p['luogo'] ?? '',
+            'Posti'             => (string)max(1, (int)$p['num_posti']),
+            'Stato'             => $stati[$p['stato'] ?? 'confermata'] ?? (string)$p['stato'],
+            'Codice'            => $p['codice_prenotazione'],
+            'Registrata il'     => !empty($p['data_prenotazione']) ? date('d/m/Y H:i', strtotime($p['data_prenotazione'])) : '',
+        ];
+        $html_righe = '';
+        foreach ($righe as $etichetta => $valore) {
+            if ($valore === '' || $valore === null) continue;
+            $html_righe .= '<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;color:#6b7280;white-space:nowrap;vertical-align:top;">' . htmlspecialchars($etichetta) . '</td>'
+                         . '<td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;font-weight:bold;">' . htmlspecialchars((string)$valore) . '</td></tr>';
+        }
+
+        // Campi aggiuntivi: etichette da campi_form (dell'area o dell'evento), nell'ordine del form
+        $custom = json_decode((string)($p['dati_custom_json'] ?? ''), true) ?: [];
+        if ($custom) {
+            $etichette = [];
+            $pag = (int)$p['pagina_id']; $ev = (int)$p['evento_id'];
+            $res_cf = $conn->query("SELECT nome_campo, etichetta FROM campi_form WHERE pagina_id = $pag AND (evento_id IS NULL OR evento_id = $ev) ORDER BY ordine ASC, id ASC");
+            if ($res_cf) while ($cf = $res_cf->fetch_assoc()) $etichette[$cf['nome_campo']] = $cf['etichetta'];
+            // Prima i campi nell'ordine del form, poi eventuali valori di campi non più presenti
+            $chiavi = array_merge(array_values(array_intersect(array_keys($etichette), array_keys($custom))), array_diff(array_keys($custom), array_keys($etichette)));
+            $html_righe .= '<tr><td colspan="2" style="padding:12px 10px 4px;font-weight:bold;color:#1f2937;">Informazioni aggiuntive</td></tr>';
+            foreach ($chiavi as $k) {
+                $v = trim((string)$custom[$k]);
+                if ($v === '') continue;
+                if (strpos($v, 'uploads/allegati_prenotazioni/') !== false) {
+                    $link = [];
+                    foreach (array_filter(array_map('trim', explode(',', $v))) as $i => $path) {
+                        $link[] = '<a href="' . htmlspecialchars(url_base_sito() . '/' . ltrim($path, '/')) . '">Allegato ' . ($i + 1) . '</a>';
+                    }
+                    $cella = implode(' · ', $link);
+                } else {
+                    $cella = nl2br(htmlspecialchars($v));
+                }
+                $html_righe .= '<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;color:#6b7280;vertical-align:top;">' . htmlspecialchars($etichette[$k] ?? ucfirst(str_replace('_', ' ', $k))) . '</td>'
+                             . '<td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">' . $cella . '</td></tr>';
+            }
+        }
+
+        $link_admin = url_base_sito() . '/admin/iscritti.php?p_id=' . (int)$p['pagina_id'] . '&f_turno=' . (int)$p['turno_id'];
+        $html = '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px;margin:8px 0 16px;">' . $html_righe . '</table>'
+              . '<p><a href="' . htmlspecialchars($link_admin) . '" style="background:#B30000;color:#ffffff;padding:10px 18px;text-decoration:none;border-radius:6px;font-weight:bold;">Apri gli iscritti del turno</a></p>';
+        return ['oggetto_evento' => $p['evento_titolo'], 'html' => $html, 'dati' => $p];
+    }
+}
+
 // ── Attestato: invio immediato se evento concluso ─────────────────────────────
 if (!function_exists('url_base_sito')) {
     // URL della radice del portale (es. https://dibest2.unical.it/eventi), senza slash finale.
@@ -1763,7 +1857,7 @@ if (!function_exists('get_widgets_home')) {
 // richiesta: quando aggiungi qualcosa qui, cambia anche il nome del marcatore.
 if (!function_exists('assicura_schema')) {
     function assicura_schema($conn) {
-        $marker = __DIR__ . '/cache/schema_v7.ok';
+        $marker = __DIR__ . '/cache/schema_v8.ok';
         if (is_file($marker)) return;
 
         // 1. Tabelle di servizio (prima create dalle singole pagine a ogni richiesta)
@@ -1825,6 +1919,9 @@ if (!function_exists('assicura_schema')) {
                 'abilita_presenze'      => "ADD COLUMN abilita_presenze TINYINT(1) NOT NULL DEFAULT 1",
                 'blocca_auto_archivio'  => "ADD COLUMN blocca_auto_archivio TINYINT(1) NOT NULL DEFAULT 0",
                 'permessi_gestori_json' => "ADD COLUMN permessi_gestori_json TEXT DEFAULT NULL",
+                // Indirizzi aggiuntivi (CSV) che ricevono il riepilogo di ogni prenotazione e disdetta dell'evento
+                'email_notifiche_extra' => "ADD COLUMN email_notifiche_extra TEXT DEFAULT NULL",
+                'allegato_pdf'          => "ADD COLUMN allegato_pdf VARCHAR(255) DEFAULT NULL",
             ],
             'pagine_eventi' => [
                 'copertina_path'        => "ADD COLUMN copertina_path VARCHAR(255) DEFAULT NULL",
@@ -1832,6 +1929,19 @@ if (!function_exists('assicura_schema')) {
                 'limite_iscrizioni'     => "ADD COLUMN limite_iscrizioni VARCHAR(20) NOT NULL DEFAULT 'nessuno'",
                 // CSV dei gestori che ricevono le email sulle prenotazioni; NULL = tutti
                 'notifiche_gestori_ids' => "ADD COLUMN notifiche_gestori_ids TEXT DEFAULT NULL",
+                // v8: colonne usate dal codice ma assenti da schema.sql (sul server aggiunte a mano)
+                'permessi_gestori_json' => "ADD COLUMN permessi_gestori_json TEXT DEFAULT NULL",
+                'firma_nome'            => "ADD COLUMN firma_nome VARCHAR(255) DEFAULT ''",
+                'firma_titolo'          => "ADD COLUMN firma_titolo VARCHAR(255) DEFAULT ''",
+                'logo_attestato_path'   => "ADD COLUMN logo_attestato_path VARCHAR(255) DEFAULT ''",
+                'allegati_box_info'     => "ADD COLUMN allegati_box_info TEXT DEFAULT NULL",
+                'allegati_sidebar'      => "ADD COLUMN allegati_sidebar TEXT DEFAULT NULL",
+            ],
+            'impostazioni_sistema' => [
+                'email_attestato_oggetto' => "ADD COLUMN email_attestato_oggetto VARCHAR(255) DEFAULT ''",
+                'email_attestato_corpo'   => "ADD COLUMN email_attestato_corpo TEXT DEFAULT NULL",
+                'email_sondaggio_oggetto' => "ADD COLUMN email_sondaggio_oggetto VARCHAR(255) DEFAULT ''",
+                'email_sondaggio_corpo'   => "ADD COLUMN email_sondaggio_corpo TEXT DEFAULT NULL",
             ],
             'sottocategorie' => [
                 // Sezione mostrata in alto, affiancata alle altre, nel layout Griglia (prima dedotto dal nome).

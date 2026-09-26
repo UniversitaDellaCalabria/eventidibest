@@ -205,12 +205,19 @@ if (isset($_POST['add_evento'])) {
     $stmt_ev->bind_param("iisssssiiiii", $filtro_p, $sub_id, $titolo, $luogo, $desc, $locandina_path, $allegato_pdf, $evid, $req_pren, $abilita_pres, $ruolo_acc, $ord);
     $stmt_ev->execute();
     $ev_id = $conn->insert_id;
+    // Indirizzi aggiuntivi per le notifiche delle prenotazioni (validati, max 10)
+    $notif_extra = normalizza_lista_email($_POST['email_notifiche_extra'] ?? '', 10, $notif_scartati);
+    $notif_csv = $notif_extra ? implode(',', $notif_extra) : null;
+    $stmt_nx = $conn->prepare("UPDATE eventi SET email_notifiche_extra = ? WHERE id = ?");
+    $stmt_nx->bind_param("si", $notif_csv, $ev_id);
+    $stmt_nx->execute();
+    $avviso_notif = $notif_scartati ? " Indirizzi non validi ignorati: " . htmlspecialchars(implode(', ', $notif_scartati)) . "." : '';
 
     $primo_turno = leggi_turno_post();
     if ($primo_turno) inserisci_turno($conn, $ev_id, $primo_turno);
     
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Creazione Evento", ["Evento ID" => $ev_id]);
-    flash_set("Evento e turni creati!");
+    flash_set("Evento e turni creati!" . $avviso_notif, $avviso_notif ? 'warning' : 'success');
     admin_redirect("eventi.php?p_id=$filtro_p");
 }
 
@@ -255,8 +262,15 @@ if (isset($_POST['edit_evento'])) {
     $stmt_upd = $conn->prepare($sql_upd);
     $stmt_upd->bind_param($types, ...$params);
     $stmt_upd->execute();
+    // Indirizzi aggiuntivi per le notifiche delle prenotazioni (validati, max 10)
+    $notif_extra = normalizza_lista_email($_POST['email_notifiche_extra'] ?? '', 10, $notif_scartati);
+    $notif_csv = $notif_extra ? implode(',', $notif_extra) : null;
+    $stmt_nx = $conn->prepare("UPDATE eventi SET email_notifiche_extra = ? WHERE id = ?");
+    $stmt_nx->bind_param("si", $notif_csv, $ev_id);
+    $stmt_nx->execute();
+    $avviso_notif = $notif_scartati ? " Indirizzi non validi ignorati: " . htmlspecialchars(implode(', ', $notif_scartati)) . "." : '';
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Modifica Evento", ["Evento ID" => $ev_id]);
-    flash_set("Evento modificato!");
+    flash_set("Evento modificato!" . $avviso_notif, $avviso_notif ? 'warning' : 'success');
     admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
 }
 
@@ -540,6 +554,9 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
                         <?php if(!empty($ev['allegato_pdf'])): ?>
                             <span class="badge" style="background:#f1f5f9;color:#475569;font-size:.68rem;"><i class="fa fa-file-pdf me-1"></i>PDF</span>
                         <?php endif; ?>
+                        <?php $notif_extra_ev = normalizza_lista_email($ev['email_notifiche_extra'] ?? ''); if ($notif_extra_ev): ?>
+                            <span class="badge" style="background:#e0e7ff;color:#3730a3;font-size:.68rem;" title="<?php echo htmlspecialchars(implode(', ', $notif_extra_ev)); ?>"><i class="fa fa-envelope me-1" aria-hidden="true"></i>Notifiche in copia: <?php echo count($notif_extra_ev); ?></span>
+                        <?php endif; ?>
                     </div>
 
                     <!-- ── TURNI ESISTENTI ── -->
@@ -692,6 +709,11 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
                         <div class="col-md-4 mb-2 pt-2 border-top"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="abilita_presenze" id="checkPres" value="1" checked><label class="form-check-label small fw-bold text-success" for="checkPres">Check-in / Scanner QR</label></div></div>
                         
                         <div class="col-12 mt-2 mb-2"><label class="form-label small fw-bold">Descrizione Evento</label><textarea name="descrizione" class="form-control form-control-sm editor-html" rows="3"></textarea></div>
+                        <div class="col-12 mb-2">
+                            <label for="notifExtraNuovo" class="form-label small fw-bold"><i class="fa fa-envelope me-1" aria-hidden="true"></i> Invia copia delle prenotazioni a</label>
+                            <input type="text" name="email_notifiche_extra" id="notifExtraNuovo" class="form-control form-control-sm" placeholder="es. segreteria@unical.it, docente@unical.it">
+                            <small class="text-muted">Facoltativo. Oltre ai gestori, questi indirizzi ricevono il riepilogo completo di ogni prenotazione e disdetta (campi aggiuntivi compresi). Separali con una virgola, massimo 10.</small>
+                        </div>
                     </div>
 
                     <div class="row bg-white p-3 rounded border border-warning shadow-sm">
@@ -776,6 +798,11 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
                         </div>
 
                         <div class="mb-2 bg-white p-2 rounded border"><label class="form-label small fw-bold">Descrizione Evento</label><textarea name="descrizione" class="form-control form-control-sm editor-html" rows="4"><?php echo htmlspecialchars($ev['descrizione'] ?? ''); ?></textarea></div>
+                        <div class="mb-2 bg-white p-2 rounded border">
+                            <label for="notifExtra<?php echo $ev['id']; ?>" class="form-label small fw-bold"><i class="fa fa-envelope me-1" aria-hidden="true"></i> Invia copia delle prenotazioni a</label>
+                            <input type="text" name="email_notifiche_extra" id="notifExtra<?php echo $ev['id']; ?>" class="form-control form-control-sm" value="<?php echo htmlspecialchars(implode(', ', normalizza_lista_email($ev['email_notifiche_extra'] ?? ''))); ?>" placeholder="es. segreteria@unical.it, docente@unical.it">
+                            <small class="text-muted">Oltre ai gestori, questi indirizzi ricevono il riepilogo completo di ogni prenotazione e disdetta. Separali con una virgola, massimo 10. Lascia vuoto per nessuno.</small>
+                        </div>
                     </div>
                     <div class="modal-footer py-2 bg-white border-top">
                         <button type="button" class="btn btn-secondary btn-sm fw-bold" data-bs-dismiss="modal">Annulla</button>
