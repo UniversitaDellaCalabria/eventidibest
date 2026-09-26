@@ -74,24 +74,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
     $num_posti = isset($_POST['num_posti']) ? max(1, (int)$_POST['num_posti']) : 1;
     $u_id_bind = $utente_logged ? (int)$_SESSION['utente_id'] : null;
 
-    if (empty($nome) || empty($cognome) || empty($email)) { header("Location: {$current_filename}.php?status=error"); exit; }
+    // Il turno deve appartenere a quest'area. Dopo l'invio si torna alla scheda del progetto
+    // se la prenotazione riguarda un progetto, altrimenti alla pagina dell'area.
+    $r_rit = $conn->query("SELECT e.id, e.tipo FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = $turno_id AND e.pagina_id = $p_id AND e.archiviato = 0 LIMIT 1");
+    $ev_rit = $r_rit ? $r_rit->fetch_assoc() : null;
+    if (!$ev_rit) { header("Location: {$current_filename}.php?status=error"); exit; }
+    $url_ritorno = "{$current_filename}.php?" . (($ev_rit['tipo'] ?? '') === 'progetto' ? 'progetto=' . (int)$ev_rit['id'] . '&' : '');
+
+    if (empty($nome) || empty($cognome) || empty($email)) { header("Location: {$url_ritorno}status=error"); exit; }
 
     // CONTROLLO DUPLICATI (Email o Matricola)
     $stmt_dup = $conn->prepare("SELECT id FROM prenotazioni WHERE turno_id = ? AND (email = ? OR (matricola != '' AND matricola = ?))");
     $stmt_dup->bind_param("iss", $turno_id, $email, $matricola); 
     $stmt_dup->execute();
-    if ($stmt_dup->get_result()->num_rows > 0) { header("Location: {$current_filename}.php?status=dup"); exit; }
+    if ($stmt_dup->get_result()->num_rows > 0) { header("Location: {$url_ritorno}status=dup"); exit; }
 
-    $stmt_t = $conn->prepare("SELECT t.*, e.titolo as evento_titolo, e.luogo, e.pagina_id FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = ? LIMIT 1");
+    $stmt_t = $conn->prepare("SELECT t.*, e.titolo as evento_titolo, e.luogo, e.pagina_id, e.ruolo_accesso_id, e.richiede_prenotazione, e.tipo AS evento_tipo FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = ? LIMIT 1");
     $stmt_t->bind_param("i", $turno_id); $stmt_t->execute(); $res_t = $stmt_t->get_result();
 
     if ($res_t && $t_info = $res_t->fetch_assoc()) {
+        // Chi può prenotare: controllato anche qui, non solo nascondendo il pulsante
+        if ((int)($t_info['richiede_prenotazione'] ?? 1) === 0) { header("Location: {$url_ritorno}status=error"); exit; }
+        $ruolo_ev = (int)($t_info['ruolo_accesso_id'] ?? 0);
+        if ($ruolo_ev !== 0) {
+            $sec_roles_pr = isset($_SESSION['utente_ruoli_secondari']) ? explode(',', $_SESSION['utente_ruoli_secondari']) : [];
+            $ruolo_ok_pr = $utente_logged && ($ruolo_ev === -1 || $utente_ruolo_id === $ruolo_ev || in_array((string)$ruolo_ev, $sec_roles_pr, true)
+                                             || $utente_ruolo_id === 1 || in_array('1', $sec_roles_pr, true));
+            if (!$ruolo_ok_pr) { header("Location: {$url_ritorno}status=riservato"); exit; }
+        }
+        // Progetti: una scuola partecipa a una sola edizione (anche la lista d'attesa conta)
+        if (($t_info['evento_tipo'] ?? '') === 'progetto') {
+            $ev_pr_id = (int)$t_info['evento_id']; $u_chk = (int)($u_id_bind ?? 0);
+            $stmt_ed = $conn->prepare("SELECT 1 FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id
+                                       WHERE t.evento_id = ? AND pr.turno_id <> ? AND IFNULL(pr.stato, 'confermata') NOT IN ('annullata', 'rifiutata', 'scaduta')
+                                         AND ((? > 0 AND pr.utente_id = ?) OR LOWER(pr.email) = ?) LIMIT 1");
+            $stmt_ed->bind_param("iiiis", $ev_pr_id, $turno_id, $u_chk, $u_chk, $email);
+            $stmt_ed->execute();
+            if ($stmt_ed->get_result()->num_rows > 0) { header("Location: {$url_ritorno}status=altra_edizione"); exit; }
+        }
+
         $now = date('Y-m-d H:i:s');
         $apertura_ok = empty($t_info['data_apertura']) || ($now >= $t_info['data_apertura']);
         $chiusura_ok = empty($t_info['data_chiusura']) || ($now <= $t_info['data_chiusura']);
 
-        if (!$apertura_ok) { header("Location: {$current_filename}.php?status=notopened"); exit; }
-        elseif (!$chiusura_ok) { header("Location: {$current_filename}.php?status=closed"); exit; }
+        if (!$apertura_ok) { header("Location: {$url_ritorno}status=notopened"); exit; }
+        elseif (!$chiusura_ok) { header("Location: {$url_ritorno}status=closed"); exit; }
 
         $limite_isc = $page_cfg['limite_iscrizioni'] ?? 'nessuno';
         if ($limite_isc !== 'nessuno') {
@@ -101,11 +128,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
             $lock_iscr = 'dibest_iscr_' . (int)$t_info['pagina_id'] . '_' . md5($email);
             $stmt_lk = $conn->prepare("SELECT GET_LOCK(?, 10)");
             $stmt_lk->bind_param("s", $lock_iscr); $stmt_lk->execute();
-            if ((int)($stmt_lk->get_result()->fetch_row()[0] ?? 0) !== 1) { header("Location: {$current_filename}.php?status=error"); exit; }
+            if ((int)($stmt_lk->get_result()->fetch_row()[0] ?? 0) !== 1) { header("Location: {$url_ritorno}status=error"); exit; }
 
             $blocco = trova_iscrizione_vincolata($conn, $limite_isc, (int)$t_info['pagina_id'], (int)$t_info['evento_id'], (int)($u_id_bind ?? 0), $email, $matricola);
             if ($blocco) {
-                header("Location: {$current_filename}.php?status=limite&ev=" . urlencode($blocco['evento_titolo'])); exit;
+                header("Location: {$url_ritorno}status=limite&ev=" . urlencode($blocco['evento_titolo'])); exit;
             }
         }
 
@@ -115,6 +142,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
         $custom_data = [];
         foreach ($_POST as $k => $v) {
             if (strpos($k, 'custom_') === 0) { $custom_data[str_replace('custom_', '', $k)] = is_array($v) ? implode(', ', $v) : trim($v); }
+        }
+
+        // Progetti: numero minimo e massimo di studenti indicati dalla scuola dentro i limiti del progetto
+        if (($t_info['evento_tipo'] ?? '') === 'progetto') {
+            $ev_pr = (int)$t_info['evento_id'];
+            $err_studenti = valida_studenti_progetto($custom_data, get_dettagli_progetti($conn, [$ev_pr])[$ev_pr] ?? null);
+            if ($err_studenti !== null) {
+                $_SESSION['errore_prenotazione'] = $err_studenti;
+                if (isset($lock_iscr)) { $conn->query("SELECT RELEASE_LOCK('" . $conn->real_escape_string($lock_iscr) . "')"); }
+                header("Location: {$url_ritorno}status=studenti"); exit;
+            }
         }
 
         if (!empty($_FILES)) {
@@ -167,7 +205,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
                     $stato_prenotazione = 'in_attesa';
                 } else {
                     $conn->rollback();
-                    header("Location: {$current_filename}.php?status=full"); exit;
+                    header("Location: {$url_ritorno}status=full"); exit;
                 }
             }
 
@@ -184,7 +222,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
         } catch (Throwable $e) {
             $conn->rollback();
             error_log("[Prenotazione][turno_id=$turno_id] Transazione fallita: " . $e->getMessage());
-            header("Location: {$current_filename}.php?status=error"); exit;
+            header("Location: {$url_ritorno}status=error"); exit;
         }
         // Posto confermato: le altre liste d'attesa della persona nell'ambito del limite decadono
         if ($insert_ok && $stato_prenotazione === 'confermata') { decadi_attese_vincolate($conn, (int)$stmt_ins->insert_id); }
@@ -226,13 +264,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
             $riepilogo = $destinatari_notifica ? html_riepilogo_prenotazione($conn, $nuovo_pr_id) : null;
             if ($riepilogo) {
                 $obj_gest = "Nuova prenotazione ($num_posti " . ($num_posti === 1 ? 'posto' : 'posti') . "): " . $t_info['evento_titolo'];
-                $body_gest = "<p>È stata registrata una nuova prenotazione per l'evento <strong>" . htmlspecialchars($t_info['evento_titolo']) . "</strong>.</p>" . $riepilogo['html'];
-                foreach ($destinatari_notifica as $em_gest) { inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn, colore_area_turno($conn, $turno_id)); }
+                $intro_gest = "<p>È stata registrata una nuova prenotazione per l'evento <strong>" . htmlspecialchars($t_info['evento_titolo']) . "</strong>.</p>";
+                $gestori_ev = get_email_gestori_evento($conn, (int)$t_info['evento_id']);
+                foreach ($destinatari_notifica as $em_gest) { inviaNotificaEmail($em_gest, $obj_gest, corpo_notifica_per($em_gest, $intro_gest, $riepilogo, $gestori_ev), $conn, colore_area_turno($conn, $turno_id)); }
             }
 
             $param_stato = ($stato_prenotazione === 'in_attesa') ? "&st_tipo=attesa" : (($stato_prenotazione === 'da_approvare') ? "&st_tipo=approvare" : "");
-            header("Location: {$current_filename}.php?status=success&code=" . urlencode($codice_p) . $param_stato); exit;
-        } else { header("Location: {$current_filename}.php?status=error"); exit; }
+            header("Location: {$url_ritorno}status=success&code=" . urlencode($codice_p) . $param_stato); exit;
+        } else { header("Location: {$url_ritorno}status=error"); exit; }
     }
     header("Location: {$current_filename}.php"); exit;
 }
@@ -257,6 +296,13 @@ if (isset($_GET['status'])) {
         $ev_bloc = htmlspecialchars($_GET['ev'] ?? '');
         $regola = (($page_cfg['limite_iscrizioni'] ?? '') === 'un_turno') ? "In quest'area puoi prenotare un solo turno per ciascun evento." : "In quest'area puoi iscriverti a un solo evento/gruppo.";
         $messaggio_prenotazione = "<div class='alert alert-warning fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-warning'><i class='fa fa-user-lock me-2'></i> $regola Risulti già iscritto a: <strong>$ev_bloc</strong>. Per cambiare, annulla prima la prenotazione dall'Area Personale.</div>";
+    }
+    elseif ($st === 'riservato') { $messaggio_prenotazione = "<div class='alert alert-warning fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-warning'><i class='fa fa-key me-2'></i> Per iscriverti devi prima accedere (SPID, CIE o credenziali Unical).</div>"; }
+    elseif ($st === 'altra_edizione') { $messaggio_prenotazione = "<div class='alert alert-warning fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-warning'><i class='fa fa-school me-2'></i> La tua scuola è già iscritta (o in lista d'attesa) a un'altra edizione di questo progetto: puoi partecipare a una sola edizione. Per cambiare, annulla prima l'iscrizione dall'Area Personale.</div>"; }
+    elseif ($st === 'studenti') {
+        $err_st = $_SESSION['errore_prenotazione'] ?? 'Numero di studenti non valido.';
+        unset($_SESSION['errore_prenotazione']);
+        $messaggio_prenotazione = "<div class='alert alert-danger fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-danger'><i class='fa fa-users me-2'></i> Iscrizione non registrata: " . htmlspecialchars($err_st) . "</div>";
     }
     elseif ($st === 'error') { $messaggio_prenotazione = "<div class='alert alert-danger fw-bold text-center my-4 shadow-sm border-0 border-start border-4 border-danger'>Errore di registrazione. Compilare tutti i campi obbligatori.</div>"; }
 }
@@ -290,6 +336,7 @@ $json_events_calendar = [];
 $sezioni_superiori = [];
 $eventi_macro = [];
 $eventi_per_categoria = [];
+$eventi_by_id = [];
 
 $sql_ev = "SELECT e.*, sc.nome as nome_sottocategoria, sc.affiancata_in_alto FROM eventi e LEFT JOIN sottocategorie sc ON e.sottocategoria_id = sc.id WHERE e.pagina_id = $p_id AND e.archiviato = 0 ORDER BY e.is_evidenza DESC, sc.ordine ASC, e.ordine ASC, e.id DESC";
 $res_ev = $conn->query($sql_ev);
@@ -311,6 +358,7 @@ if ($res_ev) {
             $t_flat['categoria'] = $ev['nome_sottocategoria'] ?: 'Altre Attività';
             $t_flat['evento_id'] = $ev['id'];
             $t_flat['is_evidenza'] = $ev['is_evidenza'];
+            $t_flat['evento_tipo'] = $ev['tipo'] ?? 'evento';
             $all_turni_flat[] = $t_flat;
 
             // Popolamento Eventi per FullCalendar (solo turni con data)
@@ -327,6 +375,7 @@ if ($res_ev) {
             }
         }
         $ev['turni'] = $turni;
+        $eventi_by_id[(int)$ev['id']] = $ev;
         $eventi_per_categoria[$ev['nome_sottocategoria'] ?: 'Altri gruppi'][] = $ev;
 
         if ((int)$ev['is_evidenza'] === 1 && $evento_evidenza === null) {
@@ -356,6 +405,62 @@ if ($res_ev) {
     }
 }
 ksort($eventi_per_data);
+
+// PROGETTI: schede (periodo, referenti, limiti di studenti…) e progetto richiesto con ?progetto=ID
+$dettagli_progetti = get_dettagli_progetti($conn, array_keys($eventi_by_id));
+foreach ($all_turni_flat as &$t_fl) {
+    $d_fl = $dettagli_progetti[(int)$t_fl['evento_id']] ?? [];
+    $t_fl['limite_studenti_min'] = !empty($d_fl['min_studenti']) ? (int)$d_fl['min_studenti'] : 1;
+    $t_fl['limite_studenti_max'] = !empty($d_fl['max_studenti']) ? (int)$d_fl['max_studenti'] : null;
+}
+unset($t_fl);
+$progetto_richiesto = (int)($_GET['progetto'] ?? 0);
+$progetto_sel = ($progetto_richiesto > 0 && ($eventi_by_id[$progetto_richiesto]['tipo'] ?? '') === 'progetto') ? $eventi_by_id[$progetto_richiesto] : null;
+if ($progetto_richiesto > 0 && !$progetto_sel && $messaggio_prenotazione === '') {
+    $messaggio_prenotazione = "<div class='alert alert-light border fw-semibold text-center my-4'><i class='fa fa-circle-info me-2'></i>Il progetto richiesto non è più disponibile: ecco l'elenco aggiornato.</div>";
+}
+
+// Dati di un progetto per elenco e scheda: scheda, edizioni (turni da 1 scuola), stato, iscrizione dell'utente
+$info_progetto = function (array $ev) use ($conn, $dettagli_progetti, &$mie_iscrizioni): array {
+    $d  = $dettagli_progetti[(int)$ev['id']] ?? [];
+    $ie = info_edizioni_progetto($conn, $d, $ev['turni'] ?? [], $mie_iscrizioni[(int)$ev['id']] ?? []);
+    $mio_ed = null;
+    foreach ($ie['edizioni'] as $ed) if ($ed['mio'] !== null) { $mio_ed = $ed; break; }
+    return ['d' => $d, 't' => $ev['turni'][0] ?? null, 'edizioni' => $ie['edizioni'], 'liberi' => $ie['liberi'],
+            // Senza date, la nota sul periodo (es. "novembre-dicembre 2026") vale più di "Date da definire"
+            'stato' => $ie['stato'], 'periodo' => (empty($d['data_inizio']) && empty($d['data_fine']) && !empty($d['periodo_note'])) ? $d['periodo_note'] : periodo_progetto($d), 'mio' => $ie['mio'], 'mio_ed' => $mio_ed,
+            'attesa' => array_sum(array_column($ie['edizioni'], 'attesa'))];
+};
+
+// Pulsante di iscrizione della scuola. Con $ed: pulsante di quella edizione (scheda);
+// senza: pulsante del progetto (elenco), che con più edizioni porta alla scheda per scegliere.
+$pulsante_progetto = function (array $ev, array $ip, ?array $ed = null) use ($col_primaria, $utente_logged, $current_filename): string {
+    $stile = 'background-color:' . $col_primaria . ';color:' . colore_testo_su($col_primaria) . ';border:none;';
+    $url_scheda = htmlspecialchars($current_filename) . '.php?progetto=' . (int)$ev['id'];
+    $mio = $ed ? $ed['mio'] : $ip['mio'];
+    if ($mio === 'richiesta_conferma') return '<a href="area_personale.php" class="btn btn-warning fw-bold text-dark w-100"><i class="fa fa-bell me-1" aria-hidden="true"></i>Posto offerto: conferma</a>';
+    if ($mio === 'in_attesa') return '<a href="area_personale.php" class="btn btn-outline-warning fw-bold text-dark w-100"><i class="fa fa-hourglass-half me-1" aria-hidden="true"></i>Sei in lista d\'attesa</a>';
+    if ($mio !== null) return '<a href="area_personale.php" class="btn btn-success fw-bold w-100"><i class="fa fa-check me-1" aria-hidden="true"></i>La tua scuola è iscritta</a>';
+    // Una scuola partecipa a una sola edizione: già iscritta (o in attesa) su un'altra
+    if ($ed && $ip['mio'] !== null) return '';
+    if (!$ip['edizioni'] || (int)($ev['richiede_prenotazione'] ?? 1) === 0) return '';
+    $c = $ip['stato']['codice'];
+    $t0 = $ip['t'];
+    if ($c === 'concluso') return '<button class="btn btn-secondary fw-bold w-100" disabled>Progetto concluso</button>';
+    if ($c === 'arrivo') return '<button class="btn btn-outline-secondary fw-bold w-100" disabled>Iscrizioni dal ' . date('d/m/Y H:i', strtotime($t0['data_apertura'])) . '</button>';
+    if (!in_array($c, ['aperte', 'attesa'], true)) return '<button class="btn btn-outline-secondary fw-bold w-100" disabled>Iscrizioni chiuse</button>';
+    if (!$utente_logged && (int)($ev['ruolo_accesso_id'] ?? 0) !== 0) {
+        $rit = urlencode($current_filename . '.php?progetto=' . (int)$ev['id']);
+        return '<a href="saml_login.php?redirect=' . $rit . '" class="btn fw-bold w-100" style="' . $stile . '"><i class="fa fa-key me-1" aria-hidden="true"></i>Accedi per iscrivere la scuola</a>';
+    }
+    if (!$ed) {
+        if (count($ip['edizioni']) > 1) return '<a href="' . $url_scheda . '#iscrizione" class="btn fw-bold w-100" style="' . $stile . '"><i class="fa fa-school me-1" aria-hidden="true"></i>Scegli l\'edizione</a>';
+        $ed = $ip['edizioni'][0];
+    }
+    $t_id = (int)$ed['t']['id'];
+    if (!$ed['libera']) return '<button type="button" class="btn btn-warning fw-bold text-dark w-100" data-bs-toggle="modal" data-bs-target="#modPrenota' . $t_id . '"><i class="fa fa-hourglass-half me-1" aria-hidden="true"></i>Mettiti in lista d\'attesa</button>';
+    return '<button type="button" class="btn fw-bold w-100" style="' . $stile . '" data-bs-toggle="modal" data-bs-target="#modPrenota' . $t_id . '"><i class="fa fa-school me-1" aria-hidden="true"></i>Iscrivi la scuola</button>';
+};
 
 // Intestazione di un giorno nei template cronologici. I turni senza data stanno sotto la chiave
 // sentinella 9999-12-31 (ultima dopo ksort): va mostrata come "Senza data fissa", non come data.
@@ -539,6 +644,7 @@ function printModalPrenotazione($t, $col_primaria, $utente_logged, $val_nome, $v
     $disponibili = $t['max_posti'] - $occ;
     $soldout = ($disponibili <= 0);
     $is_waitlist = ($soldout && isset($t['abilita_lista_attesa']) && $t['abilita_lista_attesa'] == 1);
+    $is_progetto = ($t['evento_tipo'] ?? '') === 'progetto';
     ?>
     <div class="modal fade" id="modPrenota<?php echo $t['id']; ?>" tabindex="-1">
         <div class="modal-dialog modal-lg modal-dialog-centered">
@@ -547,11 +653,21 @@ function printModalPrenotazione($t, $col_primaria, $utente_logged, $val_nome, $v
                     <?php csrf_field(); ?>
                     <input type="hidden" name="turno_id" value="<?php echo $t['id']; ?>">
                     <div class="modal-header py-2 bg-light border-bottom-0">
-                        <h6 class="modal-title fw-bold text-dark"><i class="fa fa-ticket-alt me-1" style="color:<?php echo $col_primaria; ?>;"></i> Prenotazione: <?php echo htmlspecialchars($t['evento_titolo']); ?></h6>
+                        <h6 class="modal-title fw-bold text-dark"><i class="fa <?php echo $is_progetto ? 'fa-school' : 'fa-ticket-alt'; ?> me-1" style="color:<?php echo $col_primaria; ?>;"></i> <?php echo $is_progetto ? 'Iscrizione della scuola' : 'Prenotazione'; ?>: <?php echo htmlspecialchars($t['evento_titolo']); ?><?php if ($is_progetto && !empty($t['nome_turno']) && $t['nome_turno'] !== 'Iscrizione scuole'): ?> <span class="badge ms-1" style="background: <?php echo $col_primaria; ?>; color: <?php echo colore_testo_su($col_primaria); ?>;"><?php echo htmlspecialchars($t['nome_turno']); ?></span><?php endif; ?></h6>
                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                     </div>
                     <div class="modal-body text-start">
-                        <div class="alert alert-light border shadow-sm mb-3">
+                        <?php if ($is_progetto): ?>
+                        <div class="alert <?php echo $is_waitlist ? 'alert-warning' : 'alert-info'; ?> border-0 small mb-3">
+                            <i class="fa fa-circle-info me-1" aria-hidden="true"></i>
+                            <?php if ($is_waitlist): ?>
+                                Il progetto è già stato assegnato a un'altra scuola: la tua richiesta entra in <strong>lista d'attesa</strong>, in ordine di arrivo. Se il posto si libera riceverai un'email per confermarlo.
+                            <?php else: ?>
+                                Il progetto accoglie <strong>una sola scuola</strong>, in ordine di arrivo. Compila i dati come docente referente della scuola.
+                            <?php endif; ?>
+                        </div>
+                        <?php endif; ?>
+                        <div class="alert alert-light border shadow-sm mb-3" <?php echo $is_progetto ? 'hidden' : ''; ?>>
                             <div class="d-flex align-items-center gap-2 mb-1">
                                 <?php if (!empty($t['nome_turno'])): ?><span class="badge" style="background:<?php echo $col_primaria; ?>;">🏷️ <?php echo htmlspecialchars($t['nome_turno']); ?></span><?php endif; ?>
                                 <?php if (!empty($t['data_turno'])): ?><span class="badge bg-dark">📅 <?php echo date('d/m/Y', strtotime($t['data_turno'])); ?></span><?php endif; ?>
@@ -682,8 +798,15 @@ function printModalPrenotazione($t, $col_primaria, $utente_logged, $val_nome, $v
 
                                         <?php elseif ($type === 'date'): ?>
                                             <input type="date" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
-                                        <?php elseif ($type === 'number'): ?>
-                                            <input type="number" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                        <?php elseif ($type === 'number'):
+                                            // Progetti: studenti minimi/massimi dentro i limiti del progetto (ricontrollati dal server)
+                                            $lim_attr = '';
+                                            if ($is_progetto && in_array($cf['nome_campo'], [CAMPO_STUDENTI_MIN, CAMPO_STUDENTI_MAX], true)) {
+                                                $lim_attr = 'min="' . (int)($t['limite_studenti_min'] ?? 1) . '" step="1"' . (!empty($t['limite_studenti_max']) ? ' max="' . (int)$t['limite_studenti_max'] . '"' : '');
+                                            }
+                                        ?>
+                                            <input type="number" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" <?php echo $lim_attr; ?> <?php echo $req_attr; ?> <?php echo $req_data; ?>>
+                                            <?php if ($lim_attr !== ''): ?><div class="form-text">Tra <?php echo (int)($t['limite_studenti_min'] ?? 1); ?> e <?php echo !empty($t['limite_studenti_max']) ? (int)$t['limite_studenti_max'] : 'il massimo previsto'; ?> studenti.</div><?php endif; ?>
                                         <?php elseif ($type === 'email'): ?>
                                             <input type="email" name="<?php echo htmlspecialchars($input_name); ?>" class="form-control form-control-sm" autocomplete="email" <?php echo $req_attr; ?> <?php echo $req_data; ?>>
                                         <?php elseif ($type === 'tel'): ?>
@@ -750,9 +873,9 @@ function printModalPrenotazione($t, $col_primaria, $utente_logged, $val_nome, $v
                     </div>
                     <div class="modal-footer py-2 bg-light border-top-0">
                         <?php if($is_waitlist): ?>
-                            <button type="submit" name="invia_prenotazione" class="btn btn-warning btn-sm fw-bold w-100 text-dark border-0">Aggiungimi in Lista d'Attesa</button>
+                            <button type="submit" name="invia_prenotazione" class="btn btn-warning btn-sm fw-bold w-100 text-dark border-0"><?php echo $is_progetto ? "Metti la scuola in lista d'attesa" : "Aggiungimi in Lista d'Attesa"; ?></button>
                         <?php else: ?>
-                            <button type="submit" name="invia_prenotazione" class="btn btn-primary btn-sm fw-bold w-100 shadow-sm" style="background-color: <?php echo $col_primaria; ?>; border: none;">Conferma e Prenota</button>
+                            <button type="submit" name="invia_prenotazione" class="btn btn-primary btn-sm fw-bold w-100 shadow-sm" style="background-color: <?php echo $col_primaria; ?>; border: none;"><?php echo $is_progetto ? 'Conferma l\'iscrizione della scuola' : 'Conferma e Prenota'; ?></button>
                         <?php endif; ?>
                     </div>
                 </form>
@@ -838,7 +961,7 @@ function evSetRating(btn) {
 </script>
 
 <!-- BANNER MESSAGGI E TASTO CALENDARIO RAPIDO (Per tutti tranne Calendar Layout) -->
-<?php if ($layout_template !== 'calendar'): ?>
+<?php if ($layout_template !== 'calendar' || $progetto_sel): ?>
 <div class="container mt-3" style="max-width: <?php echo htmlspecialchars($page_cfg['larghezza_contenitore'] ?? '85%'); ?>;">
     <?php echo $banner_manutenzione_admin; ?>
     <?php echo $messaggio_prenotazione; ?>
@@ -847,9 +970,240 @@ function evSetRating(btn) {
 <?php endif; ?>
 
 <!-- ======================================================= -->
+<!-- SCHEDA DI UN PROGETTO (?progetto=ID), con qualsiasi layout dell'area -->
+<!-- ======================================================= -->
+<?php if ($progetto_sel):
+    $ev_p = $progetto_sel;
+    $ip   = $info_progetto($ev_p);
+    $dp   = $ip['d']; $st_p = $ip['stato']; $tp = $ip['t'];
+    $txt_on_p = colore_testo_su($col_primaria);
+    // Periodo, sede e destinatari stanno già nell'intestazione
+    $sintesi = array_filter([
+        ['fa-calendar-days', 'Calendario', (!empty($dp['data_inizio']) || !empty($dp['data_fine'])) ? ($dp['periodo_note'] ?? '') : ''],
+        ['fa-clock', 'Ore totali', !empty($dp['ore_totali']) ? (int)$dp['ore_totali'] . ' ore' : ''],
+        ['fa-clone', 'Edizioni', count($ip['edizioni']) > 1 ? count($ip['edizioni']) . ' (una scuola per edizione)' : ''],
+        ['fa-people-arrows', 'Incontri previsti', !empty($dp['incontri_previsti']) ? (string)(int)$dp['incontri_previsti'] : ''],
+        ['fa-users', 'Studenti per scuola', (!empty($dp['min_studenti']) || !empty($dp['max_studenti']))
+            ? (!empty($dp['min_studenti']) && !empty($dp['max_studenti']) ? 'da ' . (int)$dp['min_studenti'] . ' a ' . (int)$dp['max_studenti']
+               : (!empty($dp['min_studenti']) ? 'almeno ' . (int)$dp['min_studenti'] : 'fino a ' . (int)$dp['max_studenti'])) : ''],
+        ['fa-laptop-house', 'Modalità', $dp['modalita'] ?? ''],
+    ], fn($r) => trim((string)$r[2]) !== '');
+?>
+    <style>
+        .pj-hero { background: <?php echo $col_primaria; ?>; color: <?php echo $txt_on_p; ?>; border-radius: 18px; padding: 2rem 2rem 1.75rem; position: relative; overflow: hidden; }
+        .pj-hero::after { content: ""; position: absolute; right: -80px; top: -80px; width: 260px; height: 260px; border-radius: 50%; background: rgba(255,255,255,.10); }
+        .pj-hero h1 { color: inherit; font-weight: 800; letter-spacing: -.5px; font-size: clamp(1.4rem, 2.6vw, 2.25rem); line-height: 1.2; max-width: 900px; }
+        .pj-hero .pj-fatti { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; font-weight: 600; opacity: .95; }
+        .pj-stato { display: inline-flex; align-items: center; gap: .35rem; font-size: .78rem; font-weight: 700; padding: .3rem .75rem; border-radius: 999px; }
+        .pj-box { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; box-shadow: 0 2px 10px rgba(15,23,42,.05); }
+        .pj-box h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .07em; font-weight: 800; color: #475569; margin-bottom: 1rem; }
+        .pj-desc { font-size: 1rem; line-height: 1.75; color: #1f2937; overflow-wrap: anywhere; }
+        .pj-desc img { max-width: 100%; height: auto; }
+        .pj-sintesi { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: .75rem; }
+        .pj-fatto { display: flex; gap: .75rem; align-items: center; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: .8rem 1rem; }
+        .pj-fatto-ico { flex: 0 0 40px; height: 40px; border-radius: 10px; display: flex; align-items: center; justify-content: center; background: <?php echo $col_primaria; ?>1A; color: <?php echo $col_testo_area; ?>; font-size: 1.05rem; }
+        .pj-sintesi dt { font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; color: #64748b; font-weight: 700; }
+        .pj-sintesi dd { margin: 0; font-weight: 700; color: #111827; line-height: 1.3; }
+        .pj-persona { display: flex; gap: .75rem; align-items: flex-start; padding: .75rem 0; border-top: 1px solid #f1f5f9; }
+        .pj-persona:first-of-type { border-top: 0; padding-top: 0; }
+        .pj-avatar { flex: 0 0 42px; height: 42px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 800; background: <?php echo $col_primaria; ?>; color: <?php echo $txt_on_p; ?>; }
+        .pj-persona a { color: #1f2937; text-decoration: none; overflow-wrap: anywhere; }
+        .pj-persona a:hover { text-decoration: underline; }
+        .pj-posto { display: flex; align-items: center; gap: .75rem; padding: .75rem 1rem; border-radius: 12px; background: #f8fafc; }
+        .pj-percorso { list-style: none; padding: 0; margin: 0; position: relative; }
+        .pj-percorso::before { content: ""; position: absolute; left: 17px; top: 8px; bottom: 8px; width: 2px; background: #e5e7eb; }
+        .pj-percorso li { display: flex; gap: 1rem; padding-bottom: 1.25rem; position: relative; }
+        .pj-percorso li:last-child { padding-bottom: 0; }
+        .pj-tappa { flex: 0 0 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 800; background: <?php echo $col_primaria; ?>; color: <?php echo $txt_on_p; ?>; position: relative; z-index: 1; }
+        .pj-tappa-tit { font-size: 1.02rem; font-weight: 800; margin: .35rem 0 .4rem; color: #111827; }
+        .pj-tag { display: inline-flex; align-items: center; gap: .35rem; background: #f1f5f9; color: #334155; border-radius: 999px; padding: .15rem .6rem; font-size: .78rem; font-weight: 600; }
+        @media (min-width: 992px) { .pj-side { position: sticky; top: 110px; } }
+        @media (max-width: 575.98px) {
+            .pj-hero { padding: 1.25rem; border-radius: 14px; }
+            .pj-sintesi { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }
+            .pj-fatto { flex-direction: column; align-items: flex-start; gap: .4rem; padding: .7rem; }
+        }
+    </style>
+
+    <div class="container mb-5" style="max-width: <?php echo htmlspecialchars($page_cfg['larghezza_contenitore'] ?? '85%'); ?>;">
+        <nav aria-label="Percorso" class="my-3 d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <a href="<?php echo htmlspecialchars($current_filename); ?>.php" class="fw-bold text-decoration-none" style="color: <?php echo $col_testo_area; ?>;"><i class="fa fa-arrow-left me-1" aria-hidden="true"></i><?php echo htmlspecialchars(!empty($page_cfg['titolo']) ? $page_cfg['titolo'] : 'Tutti i progetti'); ?></a>
+            <button type="button" class="btn btn-sm btn-outline-secondary fw-bold" id="pjCopiaLink"><i class="fa fa-link me-1" aria-hidden="true"></i><span>Copia il link</span></button>
+        </nav>
+
+        <header class="pj-hero shadow-sm mb-4">
+            <div class="d-flex flex-wrap gap-2 mb-3 position-relative" style="z-index:1;">
+                <span class="pj-stato" style="background: <?php echo $st_p['bg']; ?>; color: <?php echo $st_p['fg']; ?>;"><?php echo htmlspecialchars($st_p['etichetta']); ?></span>
+                <?php if (!empty($dp['struttura'])): ?><span class="pj-stato" style="background: rgba(255,255,255,.18); color: inherit;"><i class="fa fa-building-columns" aria-hidden="true"></i><?php echo htmlspecialchars($dp['struttura']); ?></span><?php endif; ?>
+            </div>
+            <h1 class="mb-3 position-relative" style="z-index:1;"><?php echo htmlspecialchars($ev_p['titolo']); ?></h1>
+            <div class="pj-fatti position-relative" style="z-index:1;">
+                <span><i class="fa fa-calendar-days me-1" aria-hidden="true"></i><?php echo htmlspecialchars($ip['periodo']); ?></span>
+                <?php if (!empty($ev_p['luogo'])): ?><span><i class="fa fa-location-dot me-1" aria-hidden="true"></i><?php echo htmlspecialchars($ev_p['luogo']); ?></span><?php endif; ?>
+                <?php if (!empty($dp['destinatari'])): ?><span><i class="fa fa-user-graduate me-1" aria-hidden="true"></i><?php echo htmlspecialchars($dp['destinatari']); ?></span><?php endif; ?>
+            </div>
+        </header>
+
+        <?php if ($sintesi): ?>
+            <h2 class="visually-hidden">In sintesi</h2>
+            <dl class="pj-sintesi mb-4">
+                <?php foreach ($sintesi as [$ico, $lbl, $val]): ?>
+                    <div class="pj-fatto">
+                        <span class="pj-fatto-ico" aria-hidden="true"><i class="fa <?php echo $ico; ?>"></i></span>
+                        <div><dt><?php echo $lbl; ?></dt><dd><?php echo htmlspecialchars($val); ?></dd></div>
+                    </div>
+                <?php endforeach; ?>
+            </dl>
+        <?php endif; ?>
+
+        <div class="row g-4 align-items-start">
+            <div class="col-lg-8">
+                <?php if (!empty($ev_p['locandina_path']) && preg_match('/\.(jpg|jpeg|png|gif|webp)$/i', $ev_p['locandina_path'])): ?>
+                    <img src="<?php echo htmlspecialchars($ev_p['locandina_path']); ?>" alt="" class="w-100 mb-4 shadow-sm" style="border-radius: 14px; max-height: 380px; object-fit: cover;">
+                <?php endif; ?>
+
+                <article class="pj-box p-4 mb-4">
+                    <h2><i class="fa fa-book-open me-1" aria-hidden="true"></i>Il progetto</h2>
+                    <div class="pj-desc"><?php echo !empty($ev_p['descrizione']) ? $ev_p['descrizione'] : '<p class="text-muted">Descrizione in arrivo.</p>'; ?></div>
+                    <?php if (!empty($ev_p['allegato_pdf'])): ?>
+                        <a href="<?php echo htmlspecialchars($ev_p['allegato_pdf']); ?>" target="_blank" rel="noopener" class="btn btn-outline-danger fw-bold mt-3"><i class="fa fa-file-pdf me-1" aria-hidden="true"></i>Programma e calendario (PDF)</a>
+                    <?php endif; ?>
+                </article>
+
+                <?php if (!empty($dp['moduli'])): ?>
+                    <section class="pj-box p-4 mb-4">
+                        <h2><i class="fa fa-route me-1" aria-hidden="true"></i>Articolazione del percorso</h2>
+                        <ol class="pj-percorso">
+                            <?php foreach ($dp['moduli'] as $mi => $mo): ?>
+                                <li>
+                                    <span class="pj-tappa" aria-hidden="true"><?php echo $mi + 1; ?></span>
+                                    <div>
+                                        <h3 class="pj-tappa-tit"><?php echo htmlspecialchars($mo['titolo'] ?? ''); ?></h3>
+                                        <div class="d-flex flex-wrap gap-2 mb-1">
+                                            <?php if (!empty($mo['ore'])): ?><span class="pj-tag"><i class="fa fa-clock" aria-hidden="true"></i><?php echo (int)$mo['ore']; ?> <?php echo (int)$mo['ore'] === 1 ? 'ora' : 'ore'; ?></span><?php endif; ?>
+                                            <?php if (!empty($mo['modalita'])): ?><span class="pj-tag"><i class="fa <?php echo stripos($mo['modalita'], 'online') !== false ? 'fa-laptop' : (stripos($mo['modalita'], 'laborator') !== false ? 'fa-flask' : 'fa-people-group'); ?>" aria-hidden="true"></i><?php echo htmlspecialchars($mo['modalita']); ?></span><?php endif; ?>
+                                            <?php if (!empty($mo['quando'])): ?><span class="pj-tag"><i class="fa fa-calendar-day" aria-hidden="true"></i><?php echo htmlspecialchars($mo['quando']); ?></span><?php endif; ?>
+                                            <?php if (!empty($mo['sede'])): ?><span class="pj-tag"><i class="fa fa-location-dot" aria-hidden="true"></i><?php echo htmlspecialchars($mo['sede']); ?></span><?php endif; ?>
+                                        </div>
+                                        <?php if (!empty($mo['descrizione'])): ?><p class="mb-0 text-secondary" style="font-size: .93rem; line-height: 1.6;"><?php echo nl2br(htmlspecialchars($mo['descrizione'])); ?></p><?php endif; ?>
+                                    </div>
+                                </li>
+                            <?php endforeach; ?>
+                        </ol>
+                    </section>
+                <?php endif; ?>
+
+                <?php foreach ([['obiettivi', 'fa-bullseye', 'Obiettivi formativi'], ['conoscenze', 'fa-book', 'Conoscenze'], ['competenze', 'fa-award', 'Competenze attese']] as [$k_s, $ico_s, $tit_s]):
+                    if (trim(strip_tags((string)($dp[$k_s] ?? ''))) === '') continue; ?>
+                    <section class="pj-box p-4 mb-4">
+                        <h2><i class="fa <?php echo $ico_s; ?> me-1" aria-hidden="true"></i><?php echo $tit_s; ?></h2>
+                        <div class="pj-desc"><?php echo $dp[$k_s]; ?></div>
+                    </section>
+                <?php endforeach; ?>
+
+                <?php if (!empty($dp['info_extra'])): ?>
+                    <section class="pj-box p-4 mb-4">
+                        <h2><i class="fa fa-table-list me-1" aria-hidden="true"></i>Altre informazioni</h2>
+                        <dl class="row mb-0">
+                            <?php foreach ($dp['info_extra'] as $ie): ?>
+                                <dt class="col-sm-4 text-secondary fw-semibold"><?php echo htmlspecialchars($ie['etichetta'] ?? ''); ?></dt>
+                                <dd class="col-sm-8 fw-semibold"><?php echo nl2br(htmlspecialchars($ie['valore'] ?? '')); ?></dd>
+                            <?php endforeach; ?>
+                        </dl>
+                    </section>
+                <?php endif; ?>
+            </div>
+
+            <aside class="col-lg-4">
+                <div class="pj-side d-flex flex-column gap-4">
+                    <?php if ($tp && (int)($ev_p['richiede_prenotazione'] ?? 1) === 1):
+                        $piu_ed = count($ip['edizioni']) > 1;
+                        // Il login e gli stati "chiuso / in arrivo / concluso" valgono per tutto il progetto: un solo pulsante
+                        $pulsante_unico = !$utente_logged || !in_array($st_p['codice'], ['aperte', 'attesa'], true) || !$piu_ed;
+                    ?>
+                    <section class="pj-box p-4" id="iscrizione" style="border-top: 4px solid <?php echo $col_primaria; ?>;">
+                        <h2><i class="fa fa-school me-1" aria-hidden="true"></i><?php echo $piu_ed ? 'Edizioni e iscrizione' : 'Iscrizione della scuola'; ?></h2>
+                        <?php if ($piu_ed): ?>
+                            <p class="small text-secondary mb-2">Il progetto si ripete in <strong><?php echo count($ip['edizioni']); ?> edizioni</strong>: ognuna accoglie una scuola. Puoi iscriverti a una sola edizione.</p>
+                        <?php endif; ?>
+                        <div class="d-flex flex-column gap-2 mb-3">
+                            <?php foreach ($ip['edizioni'] as $ed): ?>
+                                <div class="pj-posto d-block">
+                                  <div class="d-flex align-items-center gap-3">
+                                    <i class="fa <?php echo $ed['mio'] !== null ? 'fa-circle-check text-success' : ($ed['libera'] ? 'fa-circle-check text-success' : 'fa-lock text-warning'); ?> fs-4" aria-hidden="true"></i>
+                                    <div class="flex-grow-1" style="min-width: 0;">
+                                        <?php if ($piu_ed): ?><div class="fw-bold"><?php echo htmlspecialchars($ed['etichetta']); ?></div><?php endif; ?>
+                                        <div class="<?php echo $piu_ed ? 'small text-secondary' : 'fw-bold'; ?>"><?php echo $ed['libera'] ? 'Posto disponibile' : 'Già assegnata a una scuola'; ?></div>
+                                        <?php if (!$ed['libera']): ?><div class="small text-secondary"><?php echo $ed['attesa'] > 0 ? $ed['attesa'] . ($ed['attesa'] === 1 ? ' scuola' : ' scuole') . " in lista d'attesa" : "Lista d'attesa vuota"; ?></div><?php endif; ?>
+                                        <?php if (!$piu_ed && $ed['libera']): ?><div class="small text-secondary">Il progetto accoglie una sola scuola.</div><?php endif; ?>
+                                    </div>
+                                  </div>
+                                    <?php if (!$pulsante_unico): $btn_ed = $pulsante_progetto($ev_p, $ip, $ed); ?>
+                                        <?php if ($btn_ed !== ''): ?><div class="mt-2"><?php echo $btn_ed; ?></div><?php endif; ?>
+                                    <?php endif; ?>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                        <ul class="list-unstyled small mb-3">
+                            <li class="mb-1"><i class="fa fa-door-open me-2 text-secondary" aria-hidden="true"></i>Apertura: <strong><?php echo !empty($tp['data_apertura']) ? date('d/m/Y \o\r\e H:i', strtotime($tp['data_apertura'])) : 'già aperte'; ?></strong></li>
+                            <?php if (!empty($tp['data_chiusura'])): ?><li><i class="fa fa-door-closed me-2 text-secondary" aria-hidden="true"></i>Chiusura: <strong><?php echo date('d/m/Y \o\r\e H:i', strtotime($tp['data_chiusura'])); ?></strong></li><?php endif; ?>
+                        </ul>
+                        <?php if ($pulsante_unico) echo $pulsante_progetto($ev_p, $ip, $piu_ed ? null : $ip['edizioni'][0]); ?>
+                        <?php if ($ip['mio_ed'] && $piu_ed): ?><p class="small text-success fw-semibold mt-2 mb-0"><i class="fa fa-check me-1" aria-hidden="true"></i>La tua scuola: <?php echo htmlspecialchars($ip['mio_ed']['etichetta']); ?></p><?php endif; ?>
+                        <?php if ((int)($ev_p['ruolo_accesso_id'] ?? 0) !== 0 && !$utente_logged): ?>
+                            <p class="small text-secondary mt-2 mb-0">L'iscrizione la effettua il docente referente della scuola, con SPID, CIE o credenziali Unical.</p>
+                        <?php endif; ?>
+                    </section>
+                    <?php endif; ?>
+
+                    <?php if (!empty($dp['referenti'])): ?>
+                    <section class="pj-box p-4">
+                        <h2><i class="fa fa-address-book me-1" aria-hidden="true"></i>Contatti</h2>
+                        <?php foreach ($dp['referenti'] as $rf):
+                            $parole = preg_split('/\s+/', trim((string)($rf['nome'] ?? '')));
+                            $iniziali = mb_strtoupper(mb_substr($parole[0] ?? '', 0, 1) . (count($parole) > 1 ? mb_substr(end($parole), 0, 1) : ''));
+                        ?>
+                            <div class="pj-persona">
+                                <div class="pj-avatar" aria-hidden="true"><?php echo htmlspecialchars($iniziali !== '' ? $iniziali : '?'); ?></div>
+                                <div style="min-width:0;">
+                                    <?php if (!empty($rf['ruolo'])): ?><div class="small text-uppercase fw-bold text-secondary" style="letter-spacing:.05em;"><?php echo htmlspecialchars($rf['ruolo']); ?></div><?php endif; ?>
+                                    <?php if (!empty($rf['nome'])): ?>
+                                        <div class="fw-bold">
+                                            <?php if (!empty($rf['link']) && preg_match('#^https?://#i', $rf['link'])): ?>
+                                                <a href="<?php echo htmlspecialchars($rf['link']); ?>" target="_blank" rel="noopener" style="color: <?php echo $col_testo_area; ?>;"><?php echo htmlspecialchars($rf['nome']); ?> <i class="fa fa-arrow-up-right-from-square small" aria-hidden="true"></i><span class="visually-hidden"> (pagina personale, si apre in una nuova scheda)</span></a>
+                                            <?php else: ?>
+                                                <?php echo htmlspecialchars($rf['nome']); ?>
+                                            <?php endif; ?>
+                                        </div>
+                                    <?php endif; ?>
+                                    <?php if (!empty($rf['email'])): ?><div class="small"><i class="fa fa-envelope me-1 text-secondary" aria-hidden="true"></i><a href="mailto:<?php echo htmlspecialchars($rf['email']); ?>"><?php echo htmlspecialchars($rf['email']); ?></a></div><?php endif; ?>
+                                    <?php if (!empty($rf['telefono'])): ?><div class="small"><i class="fa fa-phone me-1 text-secondary" aria-hidden="true"></i><a href="tel:<?php echo htmlspecialchars(preg_replace('/[^0-9+]/', '', $rf['telefono'])); ?>"><?php echo htmlspecialchars($rf['telefono']); ?></a></div><?php endif; ?>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </section>
+                    <?php endif; ?>
+                </div>
+            </aside>
+        </div>
+    </div>
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        var btn = document.getElementById('pjCopiaLink');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+            var url = location.origin + location.pathname + '?progetto=<?php echo (int)$ev_p['id']; ?>';
+            var fatto = function () { btn.querySelector('span').textContent = 'Link copiato!'; setTimeout(function () { btn.querySelector('span').textContent = 'Copia il link'; }, 2000); };
+            if (navigator.clipboard) navigator.clipboard.writeText(url).then(fatto, function () { prompt('Copia il link:', url); });
+            else prompt('Copia il link:', url);
+        });
+    });
+    </script>
+
+<!-- ======================================================= -->
 <!-- LAYOUT 1: CALENDARIO INTERATTIVO A TUTTO SCHERMO -->
 <!-- ======================================================= -->
-<?php if ($layout_template === 'calendar'): ?>
+<?php elseif ($layout_template === 'calendar'): ?>
     <div class="container mb-5 mt-4" style="max-width: <?php echo htmlspecialchars($page_cfg['larghezza_contenitore'] ?? '85%'); ?>;">
         <?php echo $banner_manutenzione_admin; ?>
         <?php echo $messaggio_prenotazione; ?>
@@ -1598,6 +1952,171 @@ function evSetRating(btn) {
 
 
 <!-- ======================================================= -->
+<!-- LAYOUT 7: PROGETTI (elenco con stato, periodo e scheda di dettaglio) -->
+<!-- ======================================================= -->
+<?php elseif ($layout_template === 'progetti'): ?>
+    <?php
+    $mesi_pj = ['', 'gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'];
+    $lista_pj = []; $altri_eventi = [];
+    foreach ($eventi_by_id as $ev_l) {
+        if (($ev_l['tipo'] ?? '') !== 'progetto') { $altri_eventi[] = $ev_l; continue; }
+        $lista_pj[] = ['ev' => $ev_l, 'ip' => $info_progetto($ev_l)];
+    }
+    // Prima i progetti a cui ci si può iscrivere, poi in arrivo, chiusi, in corso, conclusi; a parità per data di inizio
+    usort($lista_pj, fn($a, $b) => [$a['ip']['stato']['ordine'], empty($a['ip']['d']['data_inizio']), $a['ip']['d']['data_inizio'] ?? '', (int)$a['ev']['ordine'], (int)$a['ev']['id']]
+                               <=> [$b['ip']['stato']['ordine'], empty($b['ip']['d']['data_inizio']), $b['ip']['d']['data_inizio'] ?? '', (int)$b['ev']['ordine'], (int)$b['ev']['id']]);
+    $filtri_stato = ['aperte' => 'Iscrizioni aperte', 'arrivo' => 'In arrivo', 'attesa' => "Con lista d'attesa", 'in_corso' => 'In corso', 'chiuse' => 'Iscrizioni chiuse', 'concluso' => 'Conclusi'];
+    $conta_stato = array_count_values(array_map(fn($x) => $x['ip']['stato']['codice'], $lista_pj));
+    $strutture_pj = array_values(array_unique(array_filter(array_map(fn($x) => trim((string)($x['ip']['d']['struttura'] ?? '')), $lista_pj))));
+    sort($strutture_pj);
+    $txt_on_l = colore_testo_su($col_primaria);
+    ?>
+    <style>
+        .pjl-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 16px; box-shadow: 0 2px 10px rgba(15,23,42,.05); display: grid; grid-template-columns: 110px 1fr 240px; overflow: hidden; transition: box-shadow .2s, transform .2s; }
+        .pjl-card:hover { box-shadow: 0 10px 28px rgba(15,23,42,.10); transform: translateY(-2px); }
+        .pjl-card.concluso { opacity: .7; }
+        .pjl-data { background: <?php echo $col_primaria; ?>; color: <?php echo $txt_on_l; ?>; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 1rem .5rem; line-height: 1.1; }
+        .pjl-data .g { font-size: 2.1rem; font-weight: 800; }
+        .pjl-data .m { font-size: .85rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+        .pjl-data .a { font-size: .75rem; opacity: .85; }
+        .pjl-corpo { padding: 1.25rem 1.5rem; min-width: 0; }
+        .pjl-corpo h3 { font-size: 1.2rem; font-weight: 800; margin: .35rem 0 .4rem; }
+        .pjl-corpo h3 a { color: #111827; text-decoration: none; }
+        .pjl-corpo h3 a:hover { color: <?php echo $col_testo_area; ?>; text-decoration: underline; }
+        .pjl-estratto { color: #475569; font-size: .92rem; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin: .5rem 0 0; }
+        .pjl-chip { display: inline-flex; align-items: center; gap: .35rem; background: #f1f5f9; color: #334155; border-radius: 999px; padding: .2rem .65rem; font-size: .78rem; font-weight: 600; }
+        .pjl-azioni { padding: 1.25rem; border-left: 1px solid #f1f5f9; display: flex; flex-direction: column; justify-content: center; gap: .5rem; background: #fcfcfd; }
+        .pjl-stato { display: inline-flex; font-size: .72rem; font-weight: 700; padding: .25rem .65rem; border-radius: 999px; }
+        .pjl-pill { border-radius: 999px; font-weight: 600; font-size: .85rem; }
+        .pjl-pill.active { background-color: <?php echo $col_primaria; ?> !important; border-color: <?php echo $col_primaria; ?> !important; color: <?php echo $txt_on_l; ?> !important; }
+        @media (max-width: 991.98px) { .pjl-card { grid-template-columns: 90px 1fr; } .pjl-azioni { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #f1f5f9; flex-direction: row; flex-wrap: wrap; } .pjl-azioni > * { flex: 1 1 180px; } }
+        @media (max-width: 575.98px) { .pjl-card { grid-template-columns: 1fr; } .pjl-data { flex-direction: row; gap: .5rem; padding: .6rem; } .pjl-data .g { font-size: 1.3rem; } }
+    </style>
+    <div class="container mb-5" style="max-width: <?php echo htmlspecialchars($page_cfg['larghezza_contenitore'] ?? '85%'); ?>;">
+        <div class="pj-box-intro card shadow-sm border-0 p-4 mb-4 mt-2" style="border-left: 5px solid <?php echo $col_primaria; ?> !important; border-radius: 14px;">
+            <h1 class="fw-bold m-0" style="color: <?php echo $col_testo_area; ?>; letter-spacing: -0.5px;"><?php echo htmlspecialchars(!empty($page_cfg['titolo']) ? $page_cfg['titolo'] : 'Progetti'); ?></h1>
+            <?php if (!empty($page_cfg['sottotitolo'])): ?><div class="fs-5 fw-semibold text-secondary"><?php echo htmlspecialchars($page_cfg['sottotitolo']); ?></div><?php endif; ?>
+            <?php if (!empty($page_cfg['hero_descrizione'])): ?><div class="text-dark mt-3" style="font-size: .95rem; line-height: 1.6;"><?php echo $page_cfg['hero_descrizione']; ?></div><?php endif; ?>
+        </div>
+
+        <?php if (!empty($page_cfg['box_info_html']) || !empty($page_cfg['allegati_box_info'])): ?>
+            <div class="card shadow-sm border-0 p-4 mb-4" style="border-left: 5px solid <?php echo $col_primaria; ?> !important; border-radius: 8px;">
+                <?php if (!empty($page_cfg['box_info_html'])): ?><div class="fs-6 text-dark" style="line-height: 1.7;"><?php echo $page_cfg['box_info_html']; ?></div><?php endif; ?>
+                <?php if (!empty($page_cfg['allegati_box_info'])): ?>
+                    <div class="mt-3 pt-3 border-top d-flex flex-wrap gap-2">
+                        <?php foreach (explode(',', $page_cfg['allegati_box_info']) as $all): $all = trim($all); if ($all === '') continue; ?>
+                            <a href="<?php echo htmlspecialchars($all); ?>" target="_blank" class="btn btn-outline-danger btn-sm fw-bold"><i class="fa fa-file-pdf me-1"></i> Guida / Allegato (PDF)</a>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+
+        <?php if (!$lista_pj): ?>
+            <div class="alert alert-light text-center border p-4 shadow-sm">Nessun progetto pubblicato al momento.</div>
+        <?php else: ?>
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-4 p-3 bg-light border rounded-3">
+                <label for="pjlCerca" class="visually-hidden">Cerca progetto</label>
+                <input type="search" id="pjlCerca" class="form-control form-control-sm" placeholder="Cerca progetto, struttura, referente..." style="max-width: 300px;">
+                <button type="button" class="btn btn-sm btn-outline-secondary pjl-pill active" data-pjl-stato="">Tutti <span class="opacity-75">(<?php echo count($lista_pj); ?>)</span></button>
+                <?php foreach ($filtri_stato as $cod => $lbl): if (empty($conta_stato[$cod])) continue; ?>
+                    <button type="button" class="btn btn-sm btn-outline-secondary pjl-pill" data-pjl-stato="<?php echo $cod; ?>"><?php echo $lbl; ?> <span class="opacity-75">(<?php echo $conta_stato[$cod]; ?>)</span></button>
+                <?php endforeach; ?>
+                <?php if (count($strutture_pj) > 1): ?>
+                    <label for="pjlStruttura" class="visually-hidden">Struttura</label>
+                    <select id="pjlStruttura" class="form-select form-select-sm ms-lg-auto" style="max-width: 320px;">
+                        <option value="">Tutte le strutture</option>
+                        <?php foreach ($strutture_pj as $s_pj): ?><option value="<?php echo htmlspecialchars(mb_strtolower($s_pj)); ?>"><?php echo htmlspecialchars($s_pj); ?></option><?php endforeach; ?>
+                    </select>
+                <?php endif; ?>
+            </div>
+
+            <div class="d-flex flex-column gap-3" id="pjlLista">
+                <?php foreach ($lista_pj as ['ev' => $ev_l, 'ip' => $ip_l]):
+                    $d_l = $ip_l['d']; $st_l = $ip_l['stato'];
+                    $url_scheda = htmlspecialchars($current_filename) . '.php?progetto=' . (int)$ev_l['id'];
+                    $cerca_l = mb_strtolower($ev_l['titolo'] . ' ' . ($d_l['struttura'] ?? '') . ' ' . ($d_l['destinatari'] ?? '') . ' ' . ($ev_l['luogo'] ?? '') . ' '
+                             . implode(' ', array_map(fn($r) => ($r['nome'] ?? ''), $d_l['referenti'] ?? [])) . ' ' . strip_tags($ev_l['descrizione'] ?? ''));
+                    $estratto = trim(preg_replace('/\s+/', ' ', html_entity_decode(strip_tags(str_replace('<', ' <', $ev_l['descrizione'] ?? '')), ENT_QUOTES, 'UTF-8')));
+                ?>
+                    <article class="pjl-card<?php echo $st_l['codice'] === 'concluso' ? ' concluso' : ''; ?>" data-cerca="<?php echo htmlspecialchars($cerca_l); ?>" data-stato="<?php echo $st_l['codice']; ?>" data-struttura="<?php echo htmlspecialchars(mb_strtolower(trim((string)($d_l['struttura'] ?? '')))); ?>">
+                        <div class="pjl-data" aria-hidden="true">
+                            <?php if (!empty($d_l['data_inizio'])): $ts_l = strtotime($d_l['data_inizio']); ?>
+                                <span class="g"><?php echo date('j', $ts_l); ?></span><span class="m"><?php echo $mesi_pj[(int)date('n', $ts_l)]; ?></span><span class="a"><?php echo date('Y', $ts_l); ?></span>
+                            <?php else: ?>
+                                <i class="fa fa-calendar-plus fs-3 mb-1"></i><span class="m" style="font-size:.7rem;">Date da definire</span>
+                            <?php endif; ?>
+                        </div>
+                        <div class="pjl-corpo">
+                            <div class="d-flex flex-wrap gap-2 align-items-center">
+                                <span class="pjl-stato" style="background: <?php echo $st_l['bg']; ?>; color: <?php echo $st_l['fg']; ?>;"><?php echo htmlspecialchars($st_l['etichetta']); ?></span>
+                                <?php if (!empty($d_l['struttura'])): ?><span class="small text-secondary fw-semibold"><i class="fa fa-building-columns me-1" aria-hidden="true"></i><?php echo htmlspecialchars($d_l['struttura']); ?></span><?php endif; ?>
+                            </div>
+                            <h3><a href="<?php echo $url_scheda; ?>"><?php echo htmlspecialchars($ev_l['titolo']); ?></a></h3>
+                            <div class="d-flex flex-wrap gap-2">
+                                <span class="pjl-chip"><i class="fa fa-calendar-days" aria-hidden="true"></i><?php echo htmlspecialchars($ip_l['periodo']); ?></span>
+                                <?php if (count($ip_l['edizioni']) > 1): ?><span class="pjl-chip"><i class="fa fa-clone" aria-hidden="true"></i><?php echo count($ip_l['edizioni']); ?> edizioni</span><?php endif; ?>
+                                <?php if (!empty($d_l['ore_totali'])): ?><span class="pjl-chip"><i class="fa fa-clock" aria-hidden="true"></i><?php echo (int)$d_l['ore_totali']; ?> ore</span><?php endif; ?>
+                                <?php if (!empty($d_l['max_studenti'])): ?><span class="pjl-chip"><i class="fa fa-users" aria-hidden="true"></i>fino a <?php echo (int)$d_l['max_studenti']; ?> studenti</span><?php endif; ?>
+                                <?php if (!empty($d_l['destinatari'])): ?><span class="pjl-chip"><i class="fa fa-user-graduate" aria-hidden="true"></i><?php echo htmlspecialchars($d_l['destinatari']); ?></span><?php endif; ?>
+                            </div>
+                            <?php if ($estratto !== ''): ?><p class="pjl-estratto"><?php echo htmlspecialchars(mb_strimwidth($estratto, 0, 320, '…')); ?></p><?php endif; ?>
+                        </div>
+                        <div class="pjl-azioni">
+                            <?php if ($ip_l['t'] && in_array($st_l['codice'], ['aperte', 'attesa', 'arrivo'], true)):
+                                $n_ed_l = count($ip_l['edizioni']);
+                                if ($ip_l['liberi'] > 0) $txt_disp = $n_ed_l > 1 ? $ip_l['liberi'] . ' ' . ($ip_l['liberi'] === 1 ? 'edizione disponibile' : 'edizioni disponibili') . ' su ' . $n_ed_l : 'Posto disponibile';
+                                else $txt_disp = ($n_ed_l > 1 ? 'Edizioni assegnate' : 'Assegnato') . ($ip_l['attesa'] ? ' · ' . $ip_l['attesa'] . ' in attesa' : '');
+                            ?>
+                                <div class="small fw-semibold <?php echo $ip_l['liberi'] > 0 ? 'text-success' : 'text-warning'; ?>">
+                                    <i class="fa <?php echo $ip_l['liberi'] > 0 ? 'fa-circle-check' : 'fa-lock'; ?> me-1" aria-hidden="true"></i><?php echo htmlspecialchars($txt_disp); ?>
+                                </div>
+                            <?php endif; ?>
+                            <a href="<?php echo $url_scheda; ?>" class="btn btn-outline-secondary fw-bold w-100">Dettagli<span class="visually-hidden"> di <?php echo htmlspecialchars($ev_l['titolo']); ?></span> <i class="fa fa-arrow-right ms-1" aria-hidden="true"></i></a>
+                            <?php echo $pulsante_progetto($ev_l, $ip_l); ?>
+                        </div>
+                    </article>
+                <?php endforeach; ?>
+            </div>
+            <div id="pjlVuoto" class="alert alert-light text-center border p-4 mt-3" style="display: none;">Nessun progetto corrisponde ai filtri.</div>
+
+            <script>
+            (function () {
+                var cerca = document.getElementById('pjlCerca'), strutt = document.getElementById('pjlStruttura');
+                var pills = document.querySelectorAll('[data-pjl-stato]'), statoAtt = '';
+                function applica() {
+                    var q = cerca.value.trim().toLowerCase(), s = strutt ? strutt.value : '', vis = 0;
+                    document.querySelectorAll('#pjlLista .pjl-card').forEach(function (c) {
+                        var ok = (!q || c.dataset.cerca.indexOf(q) !== -1) && (!statoAtt || c.dataset.stato === statoAtt) && (!s || c.dataset.struttura === s);
+                        c.style.display = ok ? '' : 'none';
+                        if (ok) vis++;
+                    });
+                    document.getElementById('pjlVuoto').style.display = vis ? 'none' : '';
+                }
+                cerca.addEventListener('input', applica);
+                if (strutt) strutt.addEventListener('change', applica);
+                pills.forEach(function (p) {
+                    p.addEventListener('click', function () {
+                        pills.forEach(function (x) { x.classList.remove('active'); x.setAttribute('aria-pressed', 'false'); });
+                        p.classList.add('active'); p.setAttribute('aria-pressed', 'true');
+                        statoAtt = p.dataset.pjlStato; applica();
+                    });
+                });
+            })();
+            </script>
+        <?php endif; ?>
+
+        <?php if ($altri_eventi): ?>
+            <h2 class="fw-bold fs-4 border-bottom pb-2 mt-5 mb-3" style="color: <?php echo $col_testo_area; ?>;">Altre attività</h2>
+            <div class="row g-4">
+                <?php foreach ($altri_eventi as $ev): ?>
+                    <div class="<?php echo $col_class; ?>"><?php renderCardUniversal($ev, $col_primaria, $utente_logged, $utente_ruolo_id, $nomi_ruoli, $etichette_riservato, $val_nome, $val_cognome, $val_email, $val_matricola, $conn, $chiedi_matricola); ?></div>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    </div>
+
+<!-- ======================================================= -->
 <!-- LAYOUT 3 e 4: GRID O LIST SEMPLICE (I Vecchi Layout) -->
 <!-- ======================================================= -->
 <?php else: ?>
@@ -1791,7 +2310,8 @@ function evSetRating(btn) {
 <script>
     if (window.history.replaceState) {
         const url = new URL(window.location);
-        if (url.searchParams.has('status')) { url.search = ''; window.history.replaceState({path:url.href}, '', url.href); }
+        // Toglie i parametri dell'esito, lasciando quelli di navigazione (es. ?progetto=ID)
+        if (url.searchParams.has('status')) { ['status', 'code', 'st_tipo', 'ev'].forEach(function (k) { url.searchParams.delete(k); }); window.history.replaceState({path:url.href}, '', url.href); }
     }
 </script>
 <?php require_once 'footer.php'; ?>

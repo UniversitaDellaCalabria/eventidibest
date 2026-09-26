@@ -55,13 +55,23 @@ if (isset($_POST['toggle_visibilita_pagina']) && $is_full_admin) {
 }
 
 if (isset($_POST['add_nuova_pagina']) && $is_full_admin) {
+    csrf_verify($_POST['csrf_token'] ?? '');
     $titolo_p = trim($_POST['titolo_pagina'] ?? '');
     $slug_raw = trim($_POST['slug_pagina'] ?? '');
     $slug = strtolower(preg_replace('/[^a-zA-Z0-9_]/', '', str_replace(' ', '_', $slug_raw)));
-    $col_p = $_POST['colore_primario'] ?? '#0056b3';
+    $col_p = colore_valido($_POST['colore_primario'] ?? '', '#0056B3');
     $add_menu = isset($_POST['add_to_menu']) ? 1 : 0;
 
-    if (!empty($titolo_p) && !empty($slug)) {
+    // Le pagine delle aree NON sono file: .htaccess manda /eventi/<slug>.php e /eventi/<slug>_archivio.php
+    // ad area.php, che le carica dal database. Uno slug uguale a un file o a una cartella del sito
+    // renderebbe l'area irraggiungibile (vince il file reale), quindi è rifiutato.
+    $radice_sito = dirname(__DIR__);
+    $slug_occupato = $slug !== '' && (str_ends_with($slug, '_archivio')
+        || file_exists("$radice_sito/$slug.php") || file_exists("$radice_sito/{$slug}_archivio.php") || is_dir("$radice_sito/$slug"));
+
+    if ($slug_occupato) {
+        flash_set("Lo slug '$slug' non è utilizzabile: coincide con un file o una cartella del sito. Scegline un altro.", 'danger');
+    } elseif (!empty($titolo_p) && !empty($slug)) {
         $stmt_chk_slug = $conn->prepare("SELECT id FROM pagine_eventi WHERE slug = ?");
         $stmt_chk_slug->bind_param("s", $slug);
         $stmt_chk_slug->execute();
@@ -81,19 +91,8 @@ if (isset($_POST['add_nuova_pagina']) && $is_full_admin) {
                 $stmt_menu->execute();
             }
             
-            $template_code = "<?php\n\$page_slug = '{$slug}';\nrequire_once 'master_template.php';\n?>";
-            $ok_pag = @file_put_contents(dirname(__DIR__) . '/' . $slug . '.php', $template_code);
-            $archive_code = "<?php\n\$page_slug = '{$slug}';\nrequire_once 'master_archivio.php';\n?>";
-            $ok_arc = @file_put_contents(dirname(__DIR__) . '/' . $slug . '_archivio.php', $archive_code);
-
-            if ($ok_pag === false || $ok_arc === false) {
-                error_log("[admin_header] Impossibile scrivere {$slug}.php / {$slug}_archivio.php in " . dirname(__DIR__));
-                flash_set("Area \"$titolo_p\" creata nel database, ma il server NON ha i permessi per creare i file {$slug}.php e {$slug}_archivio.php "
-                    . "nella cartella del sito. Creali a mano: {$slug}.php con   <?php \$page_slug = '{$slug}'; require_once 'master_template.php';   "
-                    . "e {$slug}_archivio.php con   <?php \$page_slug = '{$slug}'; require_once 'master_archivio.php';", 'warning');
-            } else {
-                flash_set("Area $titolo_p e pagina archivio create!");
-            }
+            // Nessun file da creare: pagina e archivio sono già raggiungibili tramite area.php
+            flash_set("Area \"" . htmlspecialchars($titolo_p) . "\" creata! È già online su {$slug}.php (archivio: {$slug}_archivio.php).");
             echo "<script>window.location.replace('impostazioni_area.php?p_id=$new_id');</script>";
             exit;
         }
@@ -101,6 +100,7 @@ if (isset($_POST['add_nuova_pagina']) && $is_full_admin) {
 }
 
 if (isset($_POST['del_pagina_completa']) && $is_full_admin) {
+    csrf_verify($_POST['csrf_token'] ?? '');
     $p_id_del = (int)$_POST['pagina_id_del'];
     $stmt_p_del = $conn->prepare("SELECT slug FROM pagine_eventi WHERE id = ? LIMIT 1");
     $stmt_p_del->bind_param("i", $p_id_del);
@@ -109,11 +109,10 @@ if (isset($_POST['del_pagina_completa']) && $is_full_admin) {
     $stmt_p_del->close();
     if ($res_p_del && $p_info_del = $res_p_del->fetch_assoc()) {
         $slug_del = $p_info_del['slug'];
+        // Ogni evento con turni, prenotazioni, messaggi, campi form e sondaggi (niente dati orfani)
         $res_evs = $conn->query("SELECT id FROM eventi WHERE pagina_id = " . (int)$p_id_del);
-        while($ev_row = $res_evs->fetch_assoc()){
-            $ev_del_id = (int)$ev_row['id'];
-            $conn->query("DELETE FROM prenotazioni WHERE turno_id IN (SELECT id FROM turni WHERE evento_id = $ev_del_id)");
-            $conn->query("DELETE FROM turni WHERE evento_id = $ev_del_id");
+        while ($res_evs && $ev_row = $res_evs->fetch_assoc()) {
+            elimina_evento($conn, (int)$ev_row['id']);
         }
         $stmt_cf = $conn->prepare("DELETE FROM campi_form WHERE pagina_id = ?");
         $stmt_cf->bind_param("i", $p_id_del); $stmt_cf->execute(); $stmt_cf->close();
@@ -126,8 +125,17 @@ if (isset($_POST['del_pagina_completa']) && $is_full_admin) {
         $stmt_mv = $conn->prepare("DELETE FROM menu_voci WHERE url = ?");
         $stmt_mv->bind_param("s", $menu_url_del); $stmt_mv->execute(); $stmt_mv->close();
         $conn->query("DELETE FROM pagine_eventi WHERE id = $p_id_del");
-        @unlink(dirname(__DIR__) . '/' . $slug_del . '.php');
-        @unlink(dirname(__DIR__) . '/' . $slug_del . '_archivio.php');
+        // Vecchi file segnaposto (creati dalle versioni precedenti): si eliminano SOLO se sono esattamente
+        // lo stub generato per quest'area, mai un altro file del sito con lo stesso nome.
+        foreach (["$slug_del_safe.php" => 'master_template.php', "{$slug_del_safe}_archivio.php" => 'master_archivio.php'] as $file_stub => $master) {
+            $percorso = dirname(__DIR__) . '/' . $file_stub;
+            if ($slug_del_safe === '' || !is_file($percorso) || filesize($percorso) > 200) continue;
+            $contenuto = preg_replace('/\s+/', '', (string)file_get_contents($percorso));
+            if ($contenuto === "<?php\$page_slug='$slug_del_safe';require_once'$master';?>"
+                || $contenuto === "<?php\$page_slug='$slug_del_safe';require_once'$master';") {
+                @unlink($percorso);
+            }
+        }
         
         flash_set("Area di lavoro eliminata definitivamente!", 'warning');
         echo "<script>window.location.replace('index.php');</script>";
@@ -355,6 +363,21 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                         <i class="fa fa-calendar-alt me-2 text-center" style="width:20px;"></i> Eventi e Turni
                     </a>
                 </li>
+                <?php
+                // Voce "Progetti": nelle aree con layout Progetti o che contengono già dei progetti
+                $mostra_progetti = ($page_cfg['layout_template'] ?? '') === 'progetti';
+                if (!$mostra_progetti && $filtro_p) {
+                    $r_np = $conn->query("SELECT 1 FROM eventi WHERE pagina_id = " . (int)$filtro_p . " AND tipo = 'progetto' LIMIT 1");
+                    $mostra_progetti = $r_np && $r_np->num_rows > 0;
+                }
+                ?>
+                <?php if ($mostra_progetti): ?>
+                <li class="nav-item">
+                    <a class="nav-link w-100 <?php echo ($current_page == 'progetti.php') ? 'active' : ''; ?>" href="progetti.php?p_id=<?php echo $filtro_p; ?>">
+                        <i class="fa fa-diagram-project me-2 text-center" style="width:20px;"></i> Progetti
+                    </a>
+                </li>
+                <?php endif; ?>
                 <li class="nav-item">
                     <a class="nav-link w-100 <?php echo ($current_page == 'archivio.php') ? 'active' : ''; ?>" href="archivio.php?p_id=<?php echo $filtro_p; ?>">
                         <i class="fa fa-archive me-2 text-center" style="width:20px;"></i> Archivio Storico
@@ -540,6 +563,7 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                     <div class="modal-dialog">
                         <div class="modal-content">
                             <form method="POST">
+                                <?php csrf_field(); ?>
                                 <div class="modal-header bg-primary text-white py-2">
                                     <h6 class="modal-title fw-bold"><i class="fa fa-plus-circle me-1"></i> Crea Nuova Area di Lavoro</h6>
                                     <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
@@ -561,6 +585,7 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                     <div class="modal-dialog modal-dialog-centered">
                         <div class="modal-content text-start border-danger">
                             <form method="POST">
+                                <?php csrf_field(); ?>
                                 <input type="hidden" name="pagina_id_del" value="<?php echo $filtro_p; ?>">
                                 <div class="modal-header bg-danger text-white py-2">
                                     <h6 class="modal-title fw-bold"><i class="fa fa-exclamation-triangle me-1"></i> Conferma Eliminazione</h6>

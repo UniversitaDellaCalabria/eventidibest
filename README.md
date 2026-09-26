@@ -14,7 +14,8 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 ## Funzionalita
 
 - **Gestione eventi multi-area** con sezioni (Pagine) personalizzabili per colori, layout e accessi
-- **7 layout di pagina**: griglia per sezioni, lista cronologica, elenco avanzato con ricerca, calendario, timeline, agenda a schede per giorno, gruppi/corsi — tutti gestiscono anche i turni senza data fissa
+- **8 layout di pagina**: griglia per sezioni, lista cronologica, elenco avanzato con ricerca, calendario, timeline, agenda a schede per giorno, gruppi/corsi, progetti — tutti gestiscono anche i turni senza data fissa
+- **Progetti** (es. Formazione Scuola Lavoro): maschera dedicata con corso di laurea, periodo o "date da definire", requisiti di accesso, ore, studenti per scuola, articolazione in moduli/fasi/incontri, obiettivi, conoscenze e competenze, referenti con pagina personale; scheda pubblica di ogni progetto con link condivisibile; **edizioni** (repliche) da una scuola ciascuna con lista d'attesa in ordine di arrivo; iscrizione del docente referente con SSO, SPID o CIE e controllo del numero minimo e massimo di studenti
 - **Prenotazioni con turni**: nome, data e orari facoltativi, apertura/chiusura automatica, multi-posto, approvazione manuale
 - **Lista d'attesa**: posizione in coda visibile all'utente ("Sei 3° in lista"), posto liberato offerto con 24 ore per confermare o rinunciare, promozione automatica
 - **Limite iscrizioni per area** (un solo evento o un solo turno per evento): le liste d'attesa non contano e decadono alla prima conferma
@@ -23,7 +24,8 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 - **Check-in** tramite QR code: scanner integrato nel pannello admin (scansione continua, contatore presenti in tempo reale, check-in manuale, lettori USB), self check-in studente, email attestato automatica post-check-in
 - **Home configurabile a widget**: carosello, la mia prossima prenotazione (con ricevuta QR), bacheca annunci, card aree, ultimi posti disponibili, prossimi appuntamenti, numeri del dipartimento — ordine con drag & drop, colonne e numero di card regolabili
 - **Gestione iscritti**: azioni di massa (presenze, approvazione, promozione dalla lista d'attesa, annullamento), prenotazione manuale
-- **Duplicazione** di eventi (con turni, campi del form e sondaggi) e di singoli turni
+- **Duplicazione** di eventi e progetti (con turni, campi del form e sondaggi) e di singoli turni
+- **Aree senza file da generare**: ogni area è servita da `area.php` tramite `.htaccess`, gli slug che coincidono con file del sito vengono rifiutati
 - **Attestati** PDF generati automaticamente al completamento dell'evento
 - **Sondaggi/questionari** collegabili agli eventi: 15 tipi di campo (rating, NPS, matrice, scelta, testo, data, email…), ordinamento drag & drop, logica condizionale ("mostra se…"), anteprima interattiva, statistiche NPS ed export XLS
 - **Dashboard amministrativa** con KPI, grafici (Chart.js), messaggi non letti
@@ -32,6 +34,7 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 - **Profilo utente**: pagina dedicata con dati SSO e modifica email personale
 - **Form builder** per campi prenotazione personalizzati per area/evento
 - **Email automatiche**: conferma, cancellazione, promemoria (via SMTP configurabile), con layout nel colore dell'area, registro degli invii ed email di prova dal pannello
+- **Notifiche delle prenotazioni** ai gestori, a indirizzi in copia scelti per ogni evento e ai referenti dei progetti, con il riepilogo completo della prenotazione (campi aggiuntivi compresi)
 - **Badge e barre dei posti disponibili** in tempo reale sulle card eventi e in home (liberi / lista d'attesa / esauriti / concluso)
 - **Colore dell'area coerente** su pagine, badge, ricevute ed email, con testo a contrasto calcolato automaticamente
 - **Accessibilità**: struttura dei titoli, landmark, focus da tastiera visibile, contrasti verificati con axe-core
@@ -117,11 +120,15 @@ location / {
 chmod 775 uploads/ cache/
 ```
 
-La cartella `cache/` deve essere scrivibile da PHP: oltre alla cache della configurazione contiene i marcatori degli aggiornamenti del database (vedi sotto).
+La cartella `cache/` deve essere scrivibile da PHP: oltre alla cache della configurazione contiene i marcatori degli aggiornamenti del database (vedi sotto). La cartella del codice invece non deve essere scrivibile: creare una nuova area non genera file.
+
+### Operazioni pianificate (cron)
+
+Gli script `cron_background.php`, `cron_attestati.php`, `admin/cron_reminders.php` e `admin/cron_backup.php` si avviano da riga di comando (es. `php cron_background.php`) oppure via URL con la chiave `CRON_KEY` del file `.env` (almeno 16 caratteri), es. `https://tuo-dominio/eventi/cron_background.php?key=LA_TUA_CHIAVE`. Senza chiave rispondono 403.
 
 ### Aggiornamenti del database
 
-Non servono script SQL manuali dopo un aggiornamento del codice. Al primo accesso la funzione `assicura_schema()` in `functions.php` crea le tabelle e le colonne mancanti e corregge i tipi di colonna dei database più vecchi, poi scrive un marcatore (es. `cache/schema_v7.ok`) e da quel momento non interroga più lo schema. Le pagine non modificano mai la struttura del database: ogni nuova colonna va aggiunta lì, cambiando il nome del marcatore.
+Non servono script SQL manuali dopo un aggiornamento del codice. Al primo accesso la funzione `assicura_schema()` in `functions.php` crea le tabelle e le colonne mancanti e corregge i tipi di colonna dei database più vecchi, poi scrive un marcatore (es. `cache/schema_v10.ok`) e da quel momento non interroga più lo schema. Le pagine non modificano mai la struttura del database: ogni nuova colonna va aggiunta lì, cambiando il nome del marcatore.
 
 ### 6. Configura il SSO (opzionale)
 
@@ -147,6 +154,7 @@ eventidibest-cms/
 │   ├── admin_header.php        # Autenticazione, RBAC, sidebar
 │   ├── dashboard.php           # Dashboard con KPI e grafici
 │   ├── eventi.php              # CRUD eventi, turni e sezioni, duplicazione
+│   ├── progetti.php            # Progetti: scheda completa, edizioni, iscrizione delle scuole
 │   ├── iscritti.php            # Gestione prenotazioni (ricerca, presenza, azioni di massa)
 │   ├── scanner.php             # Scanner check-in integrato con contatore in tempo reale
 │   ├── impostazioni_area.php   # Colori, layout e regole di ogni area
@@ -159,7 +167,7 @@ eventidibest-cms/
 │   ├── audit_log.php           # Log attivita sistema
 │   └── ...
 ├── database/
-│   └── schema.sql          # Schema completo del database (21 tabelle)
+│   └── schema.sql          # Schema completo del database (22 tabelle)
 ├── uploads/            # File caricati (escluso da git)
 ├── cache/              # Cache runtime (escluso da git)
 ├── assets/             # Icone PWA
@@ -181,7 +189,7 @@ eventidibest-cms/
 
 ## Schema Database
 
-Il database e` composto da **21 tabelle**:
+Il database e` composto da **22 tabelle**:
 
 | Tabella | Descrizione |
 |---|---|
@@ -189,7 +197,8 @@ Il database e` composto da **21 tabelle**:
 | `utenti` | Profili utente sincronizzati da SSO |
 | `pagine_eventi` | Sezioni/aree del portale (Welcome Week, OpenLab, ...) |
 | `sottocategorie` | Sezioni degli eventi per area (con opzione "affiancata in alto" nel layout Griglia) |
-| `eventi` | Singoli eventi con locandina e accesso per ruolo |
+| `eventi` | Singoli eventi e progetti (campo `tipo`) con locandina e accesso per ruolo |
+| `progetti_dettagli` | Scheda dei progetti: periodo, requisiti, studenti per scuola, referenti, moduli, obiettivi e competenze |
 | `turni` | Slot orari con posti, apertura/chiusura, lista attesa |
 | `prenotazioni` | Prenotazioni con QR code univoco e stato |
 | `campi_form` | Campi custom del form prenotazione per area/evento |
@@ -217,6 +226,8 @@ Il database e` composto da **21 tabelle**:
 - Output HTML e dati passati a JavaScript sempre codificati; i codici QR letti dallo scanner non vengono mai aperti come link
 - Colori personalizzati validati prima di essere usati negli stili
 - **Rate limiting** sugli endpoint di prenotazione e sondaggio
+- Ruolo richiesto per prenotare e appartenenza del turno all'area verificati anche dal server
+- Script cron eseguibili solo da riga di comando, con `CRON_KEY` o da un utente con il ruolo adatto
 - **Content Security Policy** (CSP) configurata in `config.php`
 - **HTTP Security Headers**: HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
 - Cookie di sessione: `Secure`, `HttpOnly`, `SameSite=Lax`

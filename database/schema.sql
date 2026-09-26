@@ -184,9 +184,35 @@ CREATE TABLE IF NOT EXISTS `eventi` (
     `permessi_gestori_json` text         DEFAULT NULL,
     `email_notifiche_extra` text         DEFAULT NULL COMMENT 'indirizzi aggiuntivi per le notifiche delle prenotazioni (CSV)',
     `allegato_pdf`          varchar(255) DEFAULT NULL,
+    `tipo`                  varchar(20)  NOT NULL DEFAULT 'evento' COMMENT 'evento | progetto',
     `ordine`                int(11)      DEFAULT 0,
     `archiviato`            tinyint(1)   DEFAULT 0,
     PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ------------------------------------------------------------
+-- Tabella: progetti_dettagli  (scheda dei progetti: un record per evento con tipo = 'progetto')
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `progetti_dettagli` (
+    `evento_id`         int(11)      NOT NULL,
+    `struttura`         varchar(255) DEFAULT '',
+    `data_inizio`       date         DEFAULT NULL,
+    `data_fine`         date         DEFAULT NULL,
+    `periodo_note`      varchar(255) DEFAULT '',
+    `destinatari`       varchar(255) DEFAULT '',
+    `modalita`          varchar(100) DEFAULT '',
+    `ore_totali`        int(11)      DEFAULT NULL,
+    `incontri_previsti` int(11)      DEFAULT NULL,
+    `min_studenti`      int(11)      DEFAULT NULL,
+    `max_studenti`      int(11)      DEFAULT NULL,
+    `referenti_json`    text         DEFAULT NULL COMMENT '[{ruolo, nome, email, telefono}]',
+    `info_extra_json`   text         DEFAULT NULL COMMENT '[{etichetta, valore}]',
+    `moduli_json`       text         DEFAULT NULL COMMENT 'articolazione: [{titolo, ore, modalita, sede, quando, descrizione}]',
+    `obiettivi`         text         DEFAULT NULL,
+    `conoscenze`        text         DEFAULT NULL,
+    `competenze`        text         DEFAULT NULL,
+    `updated_at`        datetime     DEFAULT NULL,
+    PRIMARY KEY (`evento_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ------------------------------------------------------------

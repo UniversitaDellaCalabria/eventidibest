@@ -56,6 +56,7 @@ $risultati = !empty($q_raw) ? cerca_eventi($conn, $q_raw) : [];
                 
                 // Determinare il link corretto (Pagina Attiva o Archivio Storico)
                 $link_destinazione = $is_archived ? ($ev['slug_area'] . '_archivio.php') : ($ev['slug_area'] . '.php');
+                if (!$is_archived && ($ev['tipo'] ?? '') === 'progetto') $link_destinazione .= '?progetto=' . (int)$ev['id']; // scheda del progetto
             ?>
                 <div class="col-md-6 col-lg-4">
                     <div class="card shadow-sm border-0 h-100 bg-white" style="border-radius: 8px; overflow: hidden; <?php echo $is_archived ? 'filter: grayscale(40%);' : ''; ?>">

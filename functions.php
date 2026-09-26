@@ -444,14 +444,30 @@ if (!function_exists('normalizza_lista_email')) {
 }
 
 if (!function_exists('get_destinatari_notifiche_prenotazione')) {
-    // Chi riceve il riepilogo di prenotazioni e disdette: gestori con notifiche attive + indirizzi aggiuntivi dell'evento.
+    // Chi riceve il riepilogo di prenotazioni e disdette: gestori con notifiche attive + indirizzi aggiuntivi dell'evento
+    // + referenti del progetto con "Riceve le iscrizioni" attivo.
     function get_destinatari_notifiche_prenotazione($conn, int $evento_id): array {
         $dest = [];
         foreach (get_email_gestori_evento($conn, $evento_id) as $e) $dest[strtolower(trim($e))] = true;
         $res = $conn->query("SELECT email_notifiche_extra FROM eventi WHERE id = $evento_id LIMIT 1");
         $extra = ($res && $r = $res->fetch_assoc()) ? (string)($r['email_notifiche_extra'] ?? '') : '';
         foreach (normalizza_lista_email($extra) as $e) $dest[$e] = true;
+        $res_p = $conn->query("SELECT referenti_json FROM progetti_dettagli WHERE evento_id = $evento_id LIMIT 1");
+        $referenti = ($res_p && $rp = $res_p->fetch_assoc()) ? (json_decode((string)$rp['referenti_json'], true) ?: []) : [];
+        foreach ($referenti as $rf) {
+            $em = strtolower(trim((string)($rf['email'] ?? '')));
+            if (!empty($rf['notifiche']) && filter_var($em, FILTER_VALIDATE_EMAIL)) $dest[$em] = true;
+        }
         return array_keys($dest);
+    }
+}
+
+if (!function_exists('corpo_notifica_per')) {
+    // Il pulsante "Apri gli iscritti del turno" solo per i gestori (hanno accesso all'amministrazione);
+    // referenti dei progetti e indirizzi in copia ricevono il riepilogo senza link all'admin.
+    function corpo_notifica_per(string $email, string $intro, array $riepilogo, array $email_gestori): string {
+        $gestore = in_array(strtolower(trim($email)), array_map(fn($e) => strtolower(trim($e)), $email_gestori), true);
+        return $intro . ($gestore ? $riepilogo['html'] : $riepilogo['html_senza_admin']);
     }
 }
 
@@ -517,9 +533,10 @@ if (!function_exists('html_riepilogo_prenotazione')) {
         }
 
         $link_admin = url_base_sito() . '/admin/iscritti.php?p_id=' . (int)$p['pagina_id'] . '&f_turno=' . (int)$p['turno_id'];
-        $html = '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px;margin:8px 0 16px;">' . $html_righe . '</table>'
-              . '<p><a href="' . htmlspecialchars($link_admin) . '" style="background:#B30000;color:#ffffff;padding:10px 18px;text-decoration:none;border-radius:6px;font-weight:bold;">Apri gli iscritti del turno</a></p>';
-        return ['oggetto_evento' => $p['evento_titolo'], 'html' => $html, 'dati' => $p];
+        $tabella = '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px;margin:8px 0 16px;">' . $html_righe . '</table>';
+        $html = $tabella . '<p><a href="' . htmlspecialchars($link_admin) . '" style="background:#B30000;color:#ffffff;padding:10px 18px;text-decoration:none;border-radius:6px;font-weight:bold;">Apri gli iscritti del turno</a></p>';
+        // 'html_senza_admin': per i referenti dei progetti, che non hanno accesso all'amministrazione
+        return ['oggetto_evento' => $p['evento_titolo'], 'html' => $html, 'html_senza_admin' => $tabella, 'dati' => $p];
     }
 }
 
@@ -1759,6 +1776,15 @@ if (!function_exists('duplica_evento')) {
                 throw new RuntimeException($conn->error);
             }
 
+            // Scheda del progetto (se l'evento è un progetto)
+            $cols_pd = colonne_copiabili($conn, 'progetti_dettagli', ['evento_id']);
+            if ($cols_pd) {
+                $lista_pd = implode(', ', array_map(fn($c) => "`$c`", $cols_pd));
+                if (!$conn->query("INSERT INTO progetti_dettagli (evento_id, $lista_pd) SELECT $nuovo_ev, $lista_pd FROM progetti_dettagli WHERE evento_id = $ev_id")) {
+                    throw new RuntimeException($conn->error);
+                }
+            }
+
             $n_sond = 0;
             $cols_s  = colonne_copiabili($conn, 'sondaggi', ['evento_id', 'attivo']);
             $lista_s = implode(', ', array_map(fn($c) => "`$c`", $cols_s));
@@ -1820,6 +1846,7 @@ if (!function_exists('elimina_evento')) {
             $r_t = $conn->query("SELECT id FROM turni WHERE evento_id = $ev_id");
             while ($r_t && $t = $r_t->fetch_assoc()) elimina_turno($conn, (int)$t['id']);
             $conn->query("DELETE FROM campi_form WHERE evento_id = $ev_id");
+            $conn->query("DELETE FROM progetti_dettagli WHERE evento_id = $ev_id");
             if (!$conn->query("DELETE FROM eventi WHERE id = $ev_id")) throw new RuntimeException($conn->error);
             $conn->commit();
             return true;
@@ -1913,6 +1940,7 @@ if (!function_exists('get_turni_ultimi_posti')) {
                 JOIN pagine_eventi pe ON e.pagina_id = pe.id
                 WHERE e.archiviato = 0 AND pe.visibile = 1 AND e.pagina_id IN ($in)
                   AND IFNULL(e.richiede_prenotazione, 1) = 1
+                  AND IFNULL(e.tipo, 'evento') <> 'progetto'
                   AND t.max_posti > 0 AND t.max_posti < 9000
                   AND (t.data_apertura IS NULL OR t.data_apertura <= NOW())
                   AND (t.data_chiusura IS NULL OR t.data_chiusura >= NOW())
@@ -2021,13 +2049,164 @@ if (!function_exists('get_widgets_home')) {
     }
 }
 
+// =======================================================================
+// PROGETTI (es. Formazione Scuola Lavoro): un progetto è un evento con tipo = 'progetto',
+// una scheda in progetti_dettagli e un solo turno "Iscrizione" da 1 posto: la prima scuola
+// è confermata, le altre vanno in lista d'attesa in ordine di arrivo.
+// =======================================================================
+if (!defined('CAMPO_STUDENTI_MIN')) define('CAMPO_STUDENTI_MIN', 'numero_studenti_minimo');
+if (!defined('CAMPO_STUDENTI_MAX')) define('CAMPO_STUDENTI_MAX', 'numero_studenti_massimo');
+
+if (!function_exists('get_dettagli_progetti')) {
+    // Schede dei progetti indicati: [evento_id => riga di progetti_dettagli con referenti e info già decodificati]
+    function get_dettagli_progetti($conn, array $ev_ids): array {
+        $ev_ids = array_filter(array_map('intval', $ev_ids));
+        if (!$ev_ids) return [];
+        $res = $conn->query("SELECT * FROM progetti_dettagli WHERE evento_id IN (" . implode(',', $ev_ids) . ")");
+        $out = [];
+        if ($res) {
+            while ($r = $res->fetch_assoc()) {
+                $r['referenti']  = json_decode((string)($r['referenti_json'] ?? ''), true) ?: [];
+                $r['info_extra'] = json_decode((string)($r['info_extra_json'] ?? ''), true) ?: [];
+                $r['moduli']     = json_decode((string)($r['moduli_json'] ?? ''), true) ?: [];
+                $out[(int)$r['evento_id']] = $r;
+            }
+        }
+        return $out;
+    }
+}
+
+if (!function_exists('periodo_progetto')) {
+    // "Dal 13/10/2026 al 18/12/2026", "Dal 13/10/2026", "Entro il 18/12/2026" oppure "Date da definire"
+    function periodo_progetto(?array $d): string {
+        $ini = !empty($d['data_inizio']) ? date('d/m/Y', strtotime($d['data_inizio'])) : '';
+        $fin = !empty($d['data_fine'])   ? date('d/m/Y', strtotime($d['data_fine']))   : '';
+        if ($ini && $fin) return $ini === $fin ? "Il $ini" : "Dal $ini al $fin";
+        if ($ini) return "Dal $ini";
+        if ($fin) return "Entro il $fin";
+        return 'Date da definire';
+    }
+}
+
+if (!function_exists('stato_progetto')) {
+    // Stato calcolato dalle date del progetto e dal turno di iscrizione.
+    // $occupati = posti occupati del turno (0 o 1). Ritorna ['codice', 'etichetta', 'bg', 'fg', 'ordine'].
+    function stato_progetto(?array $d, ?array $turno, int $occupati): array {
+        $oggi = date('Y-m-d');
+        $ora  = date('Y-m-d H:i:s');
+        $stati = [
+            'aperte'   => ['Iscrizioni aperte', '#DCFCE7', '#166534', 1],
+            'attesa'   => ["Assegnato · lista d'attesa aperta", '#FEF3C7', '#92400E', 2],
+            'arrivo'   => ['Iscrizioni in arrivo', '#DBEAFE', '#1E40AF', 3],
+            'chiuse'   => ['Iscrizioni chiuse', '#F1F5F9', '#334155', 4],
+            'in_corso' => ['In corso', '#EDE9FE', '#5B21B6', 5],
+            'concluso' => ['Concluso', '#E5E7EB', '#374151', 6],
+        ];
+        if (!empty($d['data_fine']) && $d['data_fine'] < $oggi) $c = 'concluso';
+        elseif (!$turno) $c = (!empty($d['data_inizio']) && $d['data_inizio'] <= $oggi) ? 'in_corso' : 'chiuse';
+        elseif (!empty($turno['data_apertura']) && $ora < $turno['data_apertura']) $c = 'arrivo';
+        elseif (!empty($turno['data_chiusura']) && $ora > $turno['data_chiusura']) $c = (!empty($d['data_inizio']) && $d['data_inizio'] <= $oggi) ? 'in_corso' : 'chiuse';
+        elseif ($occupati < (int)$turno['max_posti']) $c = 'aperte';
+        elseif (!empty($turno['abilita_lista_attesa'])) $c = 'attesa';
+        else $c = (!empty($d['data_inizio']) && $d['data_inizio'] <= $oggi) ? 'in_corso' : 'chiuse';
+        [$et, $bg, $fg, $ord] = $stati[$c];
+        return ['codice' => $c, 'etichetta' => $et, 'bg' => $bg, 'fg' => $fg, 'ordine' => $ord];
+    }
+}
+
+if (!function_exists('info_edizioni_progetto')) {
+    // Edizioni (repliche) di un progetto: ogni turno è un'edizione da 1 scuola con la sua lista d'attesa.
+    // $mie = [turno_id => stato] dell'utente corrente. Ritorna le edizioni con posti, coda e scuola assegnata,
+    // lo stato complessivo (stato_progetto su un turno "riassuntivo") e l'eventuale iscrizione dell'utente.
+    function info_edizioni_progetto($conn, ?array $d, array $turni, array $mie = []): array {
+        $edizioni = []; $occupate = 0; $posti = 0; $mio = null; $mio_turno = null;
+        foreach (array_values($turni) as $i => $t) {
+            $t_id = (int)$t['id'];
+            $occ = getPostiOccupati($conn, $t_id);
+            $r_w = $conn->query("SELECT COUNT(*) AS n FROM prenotazioni WHERE turno_id = $t_id AND stato = 'in_attesa'");
+            $r_a = $conn->query("SELECT nome, cognome, email, stato, dati_custom_json FROM prenotazioni WHERE turno_id = $t_id AND IFNULL(stato, 'confermata') IN ('confermata', 'richiesta_conferma', 'da_approvare') ORDER BY data_prenotazione ASC, id ASC LIMIT 1");
+            $max = max(1, (int)$t['max_posti']);
+            $edizioni[] = [
+                't' => $t, 'numero' => $i + 1,
+                'etichetta' => trim((string)($t['nome_turno'] ?? '')) !== '' ? $t['nome_turno'] : 'Edizione ' . ($i + 1),
+                'occ' => $occ, 'libera' => $occ < $max,
+                'attesa' => $r_w ? (int)$r_w->fetch_assoc()['n'] : 0,
+                'assegnata' => $r_a ? $r_a->fetch_assoc() : null,
+                'mio' => $mie[$t_id] ?? null,
+            ];
+            $posti += $max; $occupate += min($max, $occ);
+            if (isset($mie[$t_id]) && $mio === null) { $mio = $mie[$t_id]; $mio_turno = $t_id; }
+        }
+        // Finestra di iscrizione: la stessa per tutte le edizioni (quella del primo turno)
+        $rif = $turni ? ['data_apertura' => $turni[array_key_first($turni)]['data_apertura'] ?? null, 'data_chiusura' => $turni[array_key_first($turni)]['data_chiusura'] ?? null,
+                         'max_posti' => $posti, 'abilita_lista_attesa' => 1] : null;
+        return ['edizioni' => $edizioni, 'stato' => stato_progetto($d, $rif, $occupate), 'liberi' => $posti - $occupate,
+                'mio' => $mio, 'mio_turno' => $mio_turno, 'rif' => $rif];
+    }
+}
+
+if (!function_exists('nome_scuola_prenotazione')) {
+    // Nome della scuola da una prenotazione: primo campo del form che parla di scuola/istituto
+    function nome_scuola_prenotazione(?array $pr): string {
+        $custom = json_decode((string)($pr['dati_custom_json'] ?? ''), true) ?: [];
+        foreach ($custom as $k => $val) {
+            if (preg_match('/scuol|istitut/i', (string)$k) && is_string($val) && trim($val) !== '' && !preg_match('/^\d+$/', trim($val))) return trim($val);
+        }
+        return '';
+    }
+}
+
+if (!function_exists('assicura_campi_progetto')) {
+    // Il modulo di iscrizione dei progetti chiede sempre il numero minimo e massimo di studenti:
+    // campi dell'area (valgono per tutti i progetti), creati se mancano. Gli altri campi si gestiscono dal Form Builder.
+    function assicura_campi_progetto($conn, int $pagina_id): void {
+        $campi = [
+            [CAMPO_STUDENTI_MIN, 'Numero minimo di studenti partecipanti', -20],
+            [CAMPO_STUDENTI_MAX, 'Numero massimo di studenti partecipanti', -19],
+        ];
+        foreach ($campi as [$nome, $etichetta, $ordine]) {
+            $stmt = $conn->prepare("SELECT 1 FROM campi_form WHERE pagina_id = ? AND nome_campo = ? LIMIT 1");
+            $stmt->bind_param("is", $pagina_id, $nome);
+            $stmt->execute();
+            if ($stmt->get_result()->num_rows > 0) continue;
+            $ins = $conn->prepare("INSERT INTO campi_form (pagina_id, evento_id, nome_campo, etichetta, tipo_campo, opzioni_select, obbligatorio, ordine) VALUES (?, NULL, ?, ?, 'number', '', 1, ?)");
+            $ins->bind_param("issi", $pagina_id, $nome, $etichetta, $ordine);
+            $ins->execute();
+        }
+    }
+}
+
+if (!function_exists('valida_studenti_progetto')) {
+    // Controlla i numeri indicati dalla scuola: interi, minimo <= massimo, dentro i limiti del progetto.
+    // Ritorna null se va bene, altrimenti il messaggio di errore. Campi assenti = nessun controllo.
+    function valida_studenti_progetto(array $custom, ?array $d): ?string {
+        $has_min = isset($custom[CAMPO_STUDENTI_MIN]) && $custom[CAMPO_STUDENTI_MIN] !== '';
+        $has_max = isset($custom[CAMPO_STUDENTI_MAX]) && $custom[CAMPO_STUDENTI_MAX] !== '';
+        if (!$has_min && !$has_max) return null;
+        $lim_min = !empty($d['min_studenti']) ? (int)$d['min_studenti'] : 1;
+        $lim_max = !empty($d['max_studenti']) ? (int)$d['max_studenti'] : null;
+        foreach ([CAMPO_STUDENTI_MIN => $has_min, CAMPO_STUDENTI_MAX => $has_max] as $k => $presente) {
+            if (!$presente) continue;
+            if (!preg_match('/^\d+$/', (string)$custom[$k])) return "Il numero di studenti deve essere un numero intero.";
+            $n = (int)$custom[$k];
+            if ($n < $lim_min || ($lim_max !== null && $n > $lim_max)) {
+                return "Il numero di studenti deve essere compreso tra $lim_min e " . ($lim_max ?? 'il massimo previsto') . ".";
+            }
+        }
+        if ($has_min && $has_max && (int)$custom[CAMPO_STUDENTI_MIN] > (int)$custom[CAMPO_STUDENTI_MAX]) {
+            return "Il numero minimo di studenti non può superare il massimo.";
+        }
+        return null;
+    }
+}
+
 // Migrazioni una tantum dello schema (funziona sia su MySQL che su MariaDB).
 // UNICO punto in cui il codice modifica la struttura del database: nessuna pagina deve
 // eseguire ALTER/CREATE al volo. Il file marcatore evita di interrogare lo schema a ogni
 // richiesta: quando aggiungi qualcosa qui, cambia anche il nome del marcatore.
 if (!function_exists('assicura_schema')) {
     function assicura_schema($conn) {
-        $marker = __DIR__ . '/cache/schema_v8.ok';
+        $marker = __DIR__ . '/cache/schema_v10.ok';
         if (is_file($marker)) return;
 
         // 1. Tabelle di servizio (prima create dalle singole pagine a ogni richiesta)
@@ -2050,6 +2229,14 @@ if (!function_exists('assicura_schema')) {
             'rate_limit_attempts' => "CREATE TABLE IF NOT EXISTS rate_limit_attempts (
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, ip_hash CHAR(64) NOT NULL, endpoint VARCHAR(80) NOT NULL, hit_at DATETIME NOT NULL,
                 INDEX idx_ip_ep (ip_hash, endpoint), INDEX idx_hit (hit_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            // v9: scheda dei progetti (un record per evento con tipo = 'progetto'); tutti i campi facoltativi
+            'progetti_dettagli' => "CREATE TABLE IF NOT EXISTS progetti_dettagli (
+                evento_id INT NOT NULL PRIMARY KEY, struttura VARCHAR(255) DEFAULT '', data_inizio DATE DEFAULT NULL, data_fine DATE DEFAULT NULL,
+                periodo_note VARCHAR(255) DEFAULT '', destinatari VARCHAR(255) DEFAULT '', modalita VARCHAR(100) DEFAULT '',
+                ore_totali INT DEFAULT NULL, incontri_previsti INT DEFAULT NULL, min_studenti INT DEFAULT NULL, max_studenti INT DEFAULT NULL,
+                referenti_json TEXT DEFAULT NULL, info_extra_json TEXT DEFAULT NULL, moduli_json TEXT DEFAULT NULL,
+                obiettivi TEXT DEFAULT NULL, conoscenze TEXT DEFAULT NULL, competenze TEXT DEFAULT NULL, updated_at DATETIME DEFAULT NULL
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         ];
         foreach ($tabelle as $nome => $ddl) {
@@ -2092,6 +2279,15 @@ if (!function_exists('assicura_schema')) {
                 // Indirizzi aggiuntivi (CSV) che ricevono il riepilogo di ogni prenotazione e disdetta dell'evento
                 'email_notifiche_extra' => "ADD COLUMN email_notifiche_extra TEXT DEFAULT NULL",
                 'allegato_pdf'          => "ADD COLUMN allegato_pdf VARCHAR(255) DEFAULT NULL",
+                // v9: 'evento' | 'progetto' (i progetti si gestiscono da admin/progetti.php)
+                'tipo'                  => "ADD COLUMN tipo VARCHAR(20) NOT NULL DEFAULT 'evento'",
+            ],
+            // v10: articolazione del percorso (moduli/fasi/incontri) e sezioni obiettivi/conoscenze/competenze
+            'progetti_dettagli' => [
+                'moduli_json' => "ADD COLUMN moduli_json TEXT DEFAULT NULL",
+                'obiettivi'   => "ADD COLUMN obiettivi TEXT DEFAULT NULL",
+                'conoscenze'  => "ADD COLUMN conoscenze TEXT DEFAULT NULL",
+                'competenze'  => "ADD COLUMN competenze TEXT DEFAULT NULL",
             ],
             'pagine_eventi' => [
                 'copertina_path'        => "ADD COLUMN copertina_path VARCHAR(255) DEFAULT NULL",

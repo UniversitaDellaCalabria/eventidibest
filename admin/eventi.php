@@ -304,7 +304,10 @@ $eventi = []; $tutti_gli_eventi = [];
 $filtro_ev = isset($_GET['f_ev']) ? (int)$_GET['f_ev'] : 0;
 
 // ESTRAZIONE CON APPLICAZIONE VARIABILE MAGICA RBAC
-$res_ev = $conn->query("SELECT e.*, sc.nome as nome_sottocategoria FROM eventi e LEFT JOIN sottocategorie sc ON e.sottocategoria_id = sc.id WHERE e.pagina_id = $filtro_p AND e.archiviato = 0 $sql_filtro_eventi_rbac ORDER BY sc.ordine ASC, e.ordine ASC, e.id DESC");
+// I progetti (tipo = 'progetto') hanno la loro scheda in progetti.php
+$res_ev = $conn->query("SELECT e.*, sc.nome as nome_sottocategoria FROM eventi e LEFT JOIN sottocategorie sc ON e.sottocategoria_id = sc.id WHERE e.pagina_id = $filtro_p AND e.archiviato = 0 AND IFNULL(e.tipo, 'evento') <> 'progetto' $sql_filtro_eventi_rbac ORDER BY sc.ordine ASC, e.ordine ASC, e.id DESC");
+$res_np = $conn->query("SELECT COUNT(*) AS n FROM eventi e WHERE e.pagina_id = $filtro_p AND e.archiviato = 0 AND e.tipo = 'progetto' $sql_filtro_eventi_rbac");
+$n_progetti = $res_np ? (int)$res_np->fetch_assoc()['n'] : 0;
 
 if ($res_ev) {
     while($row = $res_ev->fetch_assoc()) {
@@ -400,6 +403,9 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
     <?php endif; ?>
 
     <div class="<?php echo $can_manage_settings ? 'col-md-9' : 'col-12'; ?>">
+        <?php if ($n_progetti > 0): ?>
+            <div class="alert alert-light border small py-2 mb-3"><i class="fa fa-diagram-project me-1" aria-hidden="true"></i>In quest'area ci sono <?php echo $n_progetti; ?> <?php echo $n_progetti === 1 ? 'progetto' : 'progetti'; ?>: li gestisci da <a href="progetti.php?p_id=<?php echo $filtro_p; ?>" class="fw-bold">Progetti</a>.</div>
+        <?php endif; ?>
         <?php if(empty($eventi)): ?>
             <div class="ev-card p-5 text-center text-muted">
                 <i class="fa fa-folder-open fs-1 mb-3 d-block" style="opacity:.3;"></i>

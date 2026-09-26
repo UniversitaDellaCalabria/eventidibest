@@ -246,9 +246,10 @@ if (isset($_GET['cancella_prenotazione'])) {
         $riepilogo = $destinatari_notifica ? html_riepilogo_prenotazione($conn, $pr_id) : null;
         if ($riepilogo) {
             $obj_gest = "Disdetta: " . $p_data['evento_titolo'];
-            $body_gest = "<p><strong>" . htmlspecialchars($p_data['nome'] . ' ' . $p_data['cognome']) . "</strong> ha appena <strong>annullato</strong> la prenotazione per l'evento <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong>.</p>" . $riepilogo['html'];
+            $intro_gest = "<p><strong>" . htmlspecialchars($p_data['nome'] . ' ' . $p_data['cognome']) . "</strong> ha appena <strong>annullato</strong> la prenotazione per l'evento <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong>.</p>";
+            $gestori_ev = get_email_gestori_evento($conn, (int)$p_data['evento_id']);
             foreach ($destinatari_notifica as $em_gest) {
-                inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn, colore_area_turno($conn, $p_data['turno_id']));
+                inviaNotificaEmail($em_gest, $obj_gest, corpo_notifica_per($em_gest, $intro_gest, $riepilogo, $gestori_ev), $conn, colore_area_turno($conn, $p_data['turno_id']));
             }
         }
 

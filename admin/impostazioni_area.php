@@ -24,7 +24,7 @@ if (isset($_POST['save_pagina_config'])) {
     $col_sec = $conn->real_escape_string($_POST['colore_secondario'] ?? '#0056b3');
     $larg_cont = $conn->real_escape_string($_POST['larghezza_contenitore'] ?? '85%');
     $tmpl = $conn->real_escape_string($_POST['layout_template'] ?? 'grid');
-    if (!in_array($tmpl, ['grid', 'list', 'advanced_list', 'calendar', 'timeline', 'agenda', 'gruppi'], true)) $tmpl = 'grid';
+    if (!in_array($tmpl, ['grid', 'list', 'advanced_list', 'calendar', 'timeline', 'agenda', 'gruppi', 'progetti'], true)) $tmpl = 'grid';
     $mostra_home = isset($_POST['mostra_in_home']) ? 1 : 0;
     $limite_isc = in_array($_POST['limite_iscrizioni'] ?? '', ['nessuno', 'un_evento', 'un_turno'], true) ? $_POST['limite_iscrizioni'] : 'nessuno';
     $num_col = isset($_POST['num_colonne']) ? (int)$_POST['num_colonne'] : 2;
@@ -154,6 +154,7 @@ if (isset($_POST['save_pagina_config'])) {
                         <option value="timeline" <?php echo ($page_cfg['layout_template'] ?? '') == 'timeline' ? 'selected' : ''; ?>>Timeline (Cronologia Verticale)</option>
                         <option value="agenda" <?php echo ($page_cfg['layout_template'] ?? '') == 'agenda' ? 'selected' : ''; ?>>Agenda a schede per giorno (orari, posti e prenotazione)</option>
                         <option value="gruppi" <?php echo ($page_cfg['layout_template'] ?? '') == 'gruppi' ? 'selected' : ''; ?>>Gruppi / Corsi (con posti e iscrizione)</option>
+                        <option value="progetti" <?php echo ($page_cfg['layout_template'] ?? '') == 'progetti' ? 'selected' : ''; ?>>Progetti (elenco con scheda di dettaglio e iscrizione della scuola)</option>
                     </select>
                 </div>
                 <div class="col-md-2"><label class="form-label small fw-bold">Colonne Griglia</label>
