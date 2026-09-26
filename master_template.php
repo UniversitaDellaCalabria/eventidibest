@@ -160,10 +160,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
         try {
             $occupati = getPostiOccupati($conn, $turno_id, true);
 
-            $stato_prenotazione = 'confermata';
-            if (isset($t_info['richiede_approvazione']) && $t_info['richiede_approvazione'] == 1) {
-                $stato_prenotazione = 'da_approvare';
-            } elseif (($occupati + $num_posti) > $t_info['max_posti']) {
+            // Anche 'da_approvare' occupa un posto: prima si verifica la capienza
+            $stato_prenotazione = (isset($t_info['richiede_approvazione']) && $t_info['richiede_approvazione'] == 1) ? 'da_approvare' : 'confermata';
+            if (($occupati + $num_posti) > $t_info['max_posti']) {
                 if (isset($t_info['abilita_lista_attesa']) && $t_info['abilita_lista_attesa'] == 1) {
                     $stato_prenotazione = 'in_attesa';
                 } else {
@@ -218,7 +217,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
                 $body_tpl = ($sys_email['email_conferma_corpo'] ?: "<p>Gentile <strong>{NOME} {COGNOME}</strong>,</p><p>Prenotazione confermata per <strong>{TITOLO_EVENTO}</strong>.</p><p>📅 {DATA_TURNO} | 🕒 {ORARIO_TURNO}<br>🎟️ Codice: <strong>{CODICE_PRENOTAZIONE}</strong></p>{LINK_RICEVUTA}") . $cal_html_buttons;
             }
             
-            inviaNotificaEmail($email, str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn);
+            inviaNotificaEmail($email, str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn, colore_area_turno($conn, $turno_id));
 
             // Gestori dell'area + del singolo evento (anche quelli assegnati da Abilitazioni), se hanno le notifiche attive
             $email_gestori = get_email_gestori_evento($conn, (int)$t_info['evento_id']);
@@ -229,7 +228,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['invia_prenotazione'])
                            . "<p>👤 " . htmlspecialchars($nome . ' ' . $cognome) . "<br>📧 " . htmlspecialchars($email)
                            . "<br>📅 " . htmlspecialchars($data_formatted ?: '-') . " | 🕒 " . htmlspecialchars($ora_formatted)
                            . "<br>🎟️ " . htmlspecialchars($codice_p) . " — <strong>" . ($stati_label[$stato_prenotazione] ?? $stato_prenotazione) . "</strong></p>";
-                foreach ($email_gestori as $em_gest) { inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn); }
+                foreach ($email_gestori as $em_gest) { inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn, colore_area_turno($conn, $turno_id)); }
             }
 
             $param_stato = ($stato_prenotazione === 'in_attesa') ? "&st_tipo=attesa" : (($stato_prenotazione === 'da_approvare') ? "&st_tipo=approvare" : "");
@@ -266,7 +265,9 @@ if (isset($_GET['status'])) {
 // =========================================================================
 // INIZIALIZZAZIONE VARIABILI DI LAYOUT E GRIGLIA
 // =========================================================================
-$col_primaria     = $page_cfg['colore_primario'] ?? '#0056b3';
+$col_primaria     = colore_valido($page_cfg['colore_primario'] ?? '', '#0056B3');
+// Colore dell'area per TESTI su sfondo chiaro: se è troppo chiaro per essere leggibile si usa il grigio scuro
+$col_testo_area   = colore_testo_su($col_primaria) === '#FFFFFF' ? $col_primaria : '#1F2937';
 $layout_template  = $page_cfg['layout_template'] ?? 'list';
 $chiedi_matricola = (int)($page_cfg['chiedi_matricola'] ?? 1);
 
@@ -291,7 +292,7 @@ $sezioni_superiori = [];
 $eventi_macro = [];
 $eventi_per_categoria = [];
 
-$sql_ev = "SELECT e.*, sc.nome as nome_sottocategoria FROM eventi e LEFT JOIN sottocategorie sc ON e.sottocategoria_id = sc.id WHERE e.pagina_id = $p_id AND e.archiviato = 0 ORDER BY e.is_evidenza DESC, sc.ordine ASC, e.ordine ASC, e.id DESC";
+$sql_ev = "SELECT e.*, sc.nome as nome_sottocategoria, sc.affiancata_in_alto FROM eventi e LEFT JOIN sottocategorie sc ON e.sottocategoria_id = sc.id WHERE e.pagina_id = $p_id AND e.archiviato = 0 ORDER BY e.is_evidenza DESC, sc.ordine ASC, e.ordine ASC, e.id DESC";
 $res_ev = $conn->query($sql_ev);
 if ($res_ev) {
     while ($ev = $res_ev->fetch_assoc()) {
@@ -335,7 +336,8 @@ if ($res_ev) {
         }
 
         $sezione = $ev['nome_sottocategoria'] ? $ev['nome_sottocategoria'] : 'Altre Attività';
-        $e_superiore = (stripos($sezione, 'Online') !== false || stripos($sezione, 'Generali') !== false || stripos($sezione, 'Speciali') !== false || stripos($sezione, 'Conclusive') !== false);
+        // Sezione affiancata in alto nel layout Griglia: opzione della sezione (admin > Eventi > Sezioni)
+        $e_superiore = (int)($ev['affiancata_in_alto'] ?? 0) === 1;
         if ($e_superiore) {
             $sezioni_superiori[$sezione][] = $ev;
         } else {
@@ -356,9 +358,28 @@ if ($res_ev) {
 }
 ksort($eventi_per_data);
 
+// Intestazione di un giorno nei template cronologici. I turni senza data stanno sotto la chiave
+// sentinella 9999-12-31 (ultima dopo ksort): va mostrata come "Senza data fissa", non come data.
+if (!defined('GIORNO_SENZA_DATA')) define('GIORNO_SENZA_DATA', '9999-12-31');
+$titolo_giorno = function (string $d): string {
+    return $d === GIORNO_SENZA_DATA
+        ? '<i class="fa fa-infinity me-2" aria-hidden="true"></i>Senza data fissa'
+        : formattaDataItaliano($d);
+};
+
 // Discipline nell'ordine definito in admin, poi eventuali gruppi senza categoria
 $ordine_cat = array_flip($categorie_nomi);
 uksort($eventi_per_categoria, fn($a, $b) => ($ordine_cat[$a] ?? PHP_INT_MAX) <=> ($ordine_cat[$b] ?? PHP_INT_MAX));
+
+// Griglia: moduli raggruppati per sezione (ordine definito in admin), quelli senza sezione in fondo.
+// L'intestazione compare per le sezioni con un nome; "Altre attività" solo se serve a distinguerle.
+$gruppi_griglia = [];
+foreach ($eventi_macro as $ev_g) { $gruppi_griglia[$ev_g['nome_sottocategoria'] ?: ''][] = $ev_g; }
+uksort($gruppi_griglia, fn($a, $b) => [($a === ''), $ordine_cat[$a] ?? PHP_INT_MAX] <=> [($b === ''), $ordine_cat[$b] ?? PHP_INT_MAX]);
+$titolo_gruppo_griglia = function (string $nome) use (&$gruppi_griglia, &$sezioni_superiori): string {
+    if ($nome !== '') return $nome;
+    return (count($gruppi_griglia) > 1 || !empty($sezioni_superiori)) ? 'Altre attività' : '';
+};
 
 $limite_iscrizioni = $page_cfg['limite_iscrizioni'] ?? 'nessuno';
 $mie_iscrizioni = $utente_logged ? get_mie_iscrizioni_area($conn, $p_id, (int)$_SESSION['utente_id'], (string)$val_email) : [];
@@ -394,7 +415,7 @@ if (!function_exists('renderCardUniversal')) {
         
         echo '<div class="card-body p-4 d-flex flex-column">';
         echo '<div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">';
-        echo '<h5 class="fw-bold fs-5 m-0" style="color: '.$col_primaria.';">'.htmlspecialchars($ev['titolo']).'</h5>';
+        echo '<h4 class="fw-bold fs-5 m-0" style="color: '.$col_primaria.';">'.htmlspecialchars($ev['titolo']).'</h4>';
         if ($ruolo_richiesto === -1) echo '<span class="badge bg-warning text-dark">🔑 Solo Autenticati</span>';
         elseif ($ruolo_richiesto > 0) echo '<span class="badge bg-dark">🔒 Solo '.htmlspecialchars($nomi_ruoli[$ruolo_richiesto] ?? '').'</span>';
         echo '</div>';
@@ -402,7 +423,7 @@ if (!function_exists('renderCardUniversal')) {
         if (!empty($ev['descrizione'])) echo '<div class="text-secondary mb-3 flex-grow-1" style="font-size: 0.9rem; line-height: 1.5;">'.$ev['descrizione'].'</div>';
         
         if (!empty($ev['allegato_pdf'])) {
-            echo '<div class="mb-3 p-3 rounded" style="background-color: #f8f9fa; border-left: 4px solid #B30000; font-size:0.9rem;">
+            echo '<div class="mb-3 p-3 rounded" style="background-color: #f8f9fa; border-left: 4px solid '.$col_primaria.'; font-size:0.9rem;">
                     <strong class="d-block mb-1 text-dark">Materiale Informativo:</strong>
                     <a href="'.htmlspecialchars($ev['allegato_pdf']).'" target="_blank" class="btn btn-outline-danger btn-sm fw-bold">
                         <i class="fa fa-file-pdf me-1"></i> Visualizza / Scarica Programma
@@ -411,7 +432,7 @@ if (!function_exists('renderCardUniversal')) {
         }
 
         if (!empty($ev['luogo'])) {
-            echo '<div class="bg-light p-2 rounded mt-2 text-dark shadow-sm" style="border-left: 4px solid #990000; font-size: 1rem;">
+            echo '<div class="bg-light p-2 rounded mt-2 text-dark shadow-sm" style="border-left: 4px solid '.$col_primaria.'; font-size: 1rem;">
                     <i class="fa fa-map-pin text-danger me-2"></i> <strong class="text-primary">Luogo:</strong> '.htmlspecialchars($ev['luogo']).'
                   </div>';
         }
@@ -496,10 +517,10 @@ if (!function_exists('renderCardUniversal')) {
                 if ($evento_concluso) { echo '<button class="btn btn-secondary btn-sm fw-bold py-1 px-3 shadow-sm" disabled style="background: #e2e8f0; color: #475569; border: 1px solid #cbd5e1;"><i class="fa fa-flag-checkered me-1"></i> Evento Concluso</button>'; }
                 elseif (!$prenotazioni_aperte) { echo '<button class="btn btn-secondary btn-sm fw-bold py-1 px-3 shadow-sm" disabled style="background: #e9ecef; color: #6c757d; border: 1px solid #ced4da;">Non Prenotabile</button>'; } 
                 elseif ($soldout && !$is_waitlist) { echo '<button class="btn btn-danger btn-sm fw-bold py-1 px-3 shadow-sm" disabled style="background: #dc3545; color: white;">Sold Out</button>'; } 
-                elseif (($ruolo_richiesto > 0 || $ruolo_richiesto === -1) && !$utente_logged) { echo '<a href="saml_login.php" class="btn btn-primary btn-sm fw-bold py-1 px-3 shadow-sm" style="background-color: '.$col_primaria.'; border: none;"><i class="fa fa-key me-1"></i> Accedi</a>'; } 
+                elseif (($ruolo_richiesto > 0 || $ruolo_richiesto === -1) && !$utente_logged) { echo '<a href="saml_login.php" class="btn btn-primary btn-sm fw-bold py-1 px-3 shadow-sm" style="background-color: '.$col_primaria.'; color: '.colore_testo_su($col_primaria).'; border: none;"><i class="fa fa-key me-1"></i> Accedi</a>'; } 
                 elseif (($ruolo_richiesto > 0 || $ruolo_richiesto === -1) && $utente_logged && !$ruolo_ok) { echo '<button class="btn btn-secondary btn-sm fw-bold py-1 px-3" disabled style="background: #e2e8f0; color: #475569; border: 1px solid #cbd5e1;">🔒 '.htmlspecialchars($etichette_riservato[$ruolo_richiesto] ?? 'Riservato').'</button>'; } 
                 elseif ($is_waitlist) { echo '<button type="button" class="btn btn-warning btn-sm fw-bold text-dark py-1 px-3 shadow-sm" data-bs-toggle="modal" data-bs-target="#modPrenota'.$t['id'].'">Lista d\'Attesa</button>'; } 
-                else { echo '<button type="button" class="btn btn-primary btn-sm fw-bold py-1 px-4 shadow-sm" style="background-color: '.$col_primaria.'; border: none;" data-bs-toggle="modal" data-bs-target="#modPrenota'.$t['id'].'">Prenota Ora</button>'; }
+                else { echo '<button type="button" class="btn btn-primary btn-sm fw-bold py-1 px-4 shadow-sm" style="background-color: '.$col_primaria.'; color: '.colore_testo_su($col_primaria).'; border: none;" data-bs-toggle="modal" data-bs-target="#modPrenota'.$t['id'].'">Prenota Ora</button>'; }
                 
                 echo '</div></div></div>'; 
             }
@@ -723,7 +744,7 @@ function printModalPrenotazione($t, $col_primaria, $utente_logged, $val_nome, $v
                         <div class="form-check mt-3 mb-1 p-3 bg-light rounded border border-secondary shadow-sm">
                             <input class="form-check-input border-secondary" type="checkbox" name="accetta_privacy" id="privacyCheck_<?php echo $t['id']; ?>" required>
                             <label class="form-check-label text-dark" for="privacyCheck_<?php echo $t['id']; ?>" style="font-size: 0.85rem; line-height: 1.4;">
-                                Ho letto e accetto l'<a href="privacy.php" target="_blank" class="fw-bold" style="color: #B80000; text-decoration: underline;">Informativa sulla Privacy</a> e acconsento al trattamento dei dati personali.
+                                Ho letto e accetto l'<a href="privacy.php" target="_blank" class="fw-bold" style="color: <?php echo colore_testo_su($col_primaria) === '#FFFFFF' ? $col_primaria : '#1F2937'; ?>; text-decoration: underline;">Informativa sulla Privacy</a> e acconsento al trattamento dei dati personali.
                             </label>
                         </div>
                         
@@ -775,13 +796,13 @@ function getPulsanteAzione($t, $col_primaria, $utente_logged, $utente_ruolo_id, 
     if ($soldout && !$is_waitlist) {
         return '<button class="btn btn-danger btn-sm fw-bold py-1 px-3 shadow-sm" disabled>Sold Out</button>';
     } elseif (($ruolo_richiesto > 0 || $ruolo_richiesto === -1) && !$utente_logged) {
-        return '<a href="saml_login.php" class="btn btn-primary btn-sm fw-bold py-1 px-3 shadow-sm" style="background-color: '.$col_primaria.'; border: none;"><i class="fa fa-key me-1"></i> Accedi</a>';
+        return '<a href="saml_login.php" class="btn btn-primary btn-sm fw-bold py-1 px-3 shadow-sm" style="background-color: '.$col_primaria.'; color: '.colore_testo_su($col_primaria).'; border: none;"><i class="fa fa-key me-1"></i> Accedi</a>';
     } elseif (($ruolo_richiesto > 0 || $ruolo_richiesto === -1) && $utente_logged && !$ruolo_ok) {
         return '<button class="btn btn-secondary btn-sm fw-bold py-1 px-3" disabled>🔒 Riservato</button>';
     } elseif ($is_waitlist) {
         return '<button type="button" class="btn btn-warning btn-sm fw-bold text-dark py-1 px-3 shadow-sm" data-bs-toggle="modal" data-bs-target="#modPrenota'.$t['id'].'">Lista d\'Attesa</button>';
     } else {
-        return '<button type="button" class="btn btn-primary btn-sm fw-bold py-1 px-4 shadow-sm" style="background-color: '.$col_primaria.'; border: none;" data-bs-toggle="modal" data-bs-target="#modPrenota'.$t['id'].'">Prenota Ora</button>';
+        return '<button type="button" class="btn btn-primary btn-sm fw-bold py-1 px-4 shadow-sm" style="background-color: '.$col_primaria.'; color: '.colore_testo_su($col_primaria).'; border: none;" data-bs-toggle="modal" data-bs-target="#modPrenota'.$t['id'].'">Prenota Ora</button>';
     }
 }
 
@@ -835,32 +856,75 @@ function evSetRating(btn) {
         <?php echo $messaggio_prenotazione; ?>
         
         <div class="card shadow-lg border-0 rounded-4 overflow-hidden mt-3">
-            <div class="card-header text-white p-4" style="background-color: <?php echo $col_primaria; ?>;">
-                <h2 class="fw-bold m-0"><i class="fa fa-calendar-days me-2"></i> <?php echo htmlspecialchars(!empty($page_cfg['titolo']) ? $page_cfg['titolo'] : 'Calendario Eventi'); ?></h2>
+            <div class="card-header p-4" style="background-color: <?php echo $col_primaria; ?>; color: <?php echo colore_testo_su($col_primaria); ?>;">
+                <h2 class="fw-bold m-0"><i class="fa fa-calendar-days me-2" aria-hidden="true"></i> <?php echo htmlspecialchars(!empty($page_cfg['titolo']) ? $page_cfg['titolo'] : 'Calendario Eventi'); ?></h2>
                 <p class="m-0 mt-1 opacity-75">Clicca su un evento nel calendario per visualizzare i dettagli e prenotarti.</p>
             </div>
             <div class="card-body p-4 bg-white">
                 <div id="fullCalendarDiv"></div>
             </div>
         </div>
+
+        <?php
+        // I turni senza data non possono stare nel calendario: elencati qui sotto, prenotabili come gli altri
+        $turni_senza_data = array_values(array_filter($all_turni_flat, fn($t) => empty($t['data_turno'])));
+        ?>
+        <?php if ($turni_senza_data): ?>
+        <div class="card shadow-sm border-0 rounded-4 mt-4">
+            <div class="card-body p-4">
+                <h2 class="fw-bold fs-4 mb-1" style="color: <?php echo $col_testo_area; ?>;"><i class="fa fa-infinity me-2" aria-hidden="true"></i>Attività senza data fissa</h2>
+                <p class="text-secondary small mb-3">Non compaiono nel calendario perché non hanno un giorno stabilito.</p>
+                <div class="list-group list-group-flush">
+                    <?php foreach ($turni_senza_data as $t_nd): ?>
+                        <div class="list-group-item px-0 d-flex flex-wrap justify-content-between align-items-center gap-2">
+                            <div>
+                                <div class="fw-bold text-dark"><?php echo htmlspecialchars($t_nd['evento_titolo']); ?></div>
+                                <div class="small text-secondary">
+                                    <?php echo htmlspecialchars(etichetta_turno($t_nd)); ?>
+                                    <?php if (!empty($t_nd['evento_luogo'])): ?> · <i class="fa fa-map-marker-alt" aria-hidden="true"></i> <?php echo htmlspecialchars($t_nd['evento_luogo']); ?><?php endif; ?>
+                                </div>
+                            </div>
+                            <div><?php echo getPulsanteAzione($t_nd, $col_primaria, $utente_logged, $utente_ruolo_id, $conn, $nomi_ruoli); ?></div>
+                        </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
     </div>
-    
+
+    <?php
+    // Il calendario si apre sul mese del primo turno ancora da svolgere (non sempre sul mese corrente)
+    $data_iniziale_cal = null;
+    foreach ($all_turni_flat as $t_c) {
+        if (!empty($t_c['data_turno']) && !turno_concluso($t_c)) { $data_iniziale_cal = $t_c['data_turno']; break; }
+    }
+    ?>
     <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.js"></script>
     <script>
       document.addEventListener('DOMContentLoaded', function() {
         var calendarEl = document.getElementById('fullCalendarDiv');
         var calendar = new FullCalendar.Calendar(calendarEl, {
           initialView: 'dayGridMonth', locale: 'it',
+          <?php if ($data_iniziale_cal): ?>initialDate: <?php echo json_encode($data_iniziale_cal); ?>,<?php endif; ?>
           headerToolbar: { left: 'prev,next today', center: 'title', right: 'dayGridMonth,timeGridWeek,listWeek' },
-          events: <?php echo json_encode($json_events_calendar); ?>,
+          events: <?php echo json_encode($json_events_calendar, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT); ?>,
           eventClick: function(info) {
               info.jsEvent.preventDefault();
               var myModal = new bootstrap.Modal(document.getElementById('modPrenota' + info.event.extendedProps.turno_id));
               myModal.show();
           },
           eventContent: function(arg) {
-            let loc = arg.event.extendedProps.luogo ? `<br><small>📍 ${arg.event.extendedProps.luogo}</small>` : '';
-            return { html: `<div class="p-1" style="white-space:normal; font-size:0.8rem; font-weight:bold; overflow:hidden;">${arg.event.title}${loc}</div>` };
+            // Costruito con nodi DOM (textContent): titolo e luogo non vengono mai interpretati come HTML
+            var box = document.createElement('div');
+            box.className = 'p-1';
+            box.style.cssText = 'white-space:normal; font-size:0.8rem; font-weight:bold; overflow:hidden;';
+            box.appendChild(document.createTextNode(arg.event.title));
+            if (arg.event.extendedProps.luogo) {
+              box.appendChild(document.createElement('br'));
+              var s = document.createElement('small'); s.textContent = '📍 ' + arg.event.extendedProps.luogo; box.appendChild(s);
+            }
+            return { domNodes: [box] };
           }
         });
         calendar.render();
@@ -927,6 +991,10 @@ function evSetRating(btn) {
                             <label class="form-label small fw-bold text-secondary"><i class="fa fa-calendar-day me-1"></i> A data</label>
                             <input type="date" id="advSearchDateTo" class="form-control form-control-sm">
                         </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" id="advSearchSenzaData" checked>
+                            <label class="form-check-label small fw-bold text-secondary" for="advSearchSenzaData">Includi attività senza data</label>
+                        </div>
                         <div class="mb-4">
                             <label class="form-label small fw-bold text-secondary"><i class="fa fa-users-slash me-1"></i> Mostra Soldout</label>
                             <select id="advSearchSoldout" class="form-select form-select-sm">
@@ -968,7 +1036,7 @@ function evSetRating(btn) {
                                 
                                 $data_text = strtolower($t_flat['evento_titolo'] . ' ' . $t_flat['evento_luogo'] . ' ' . $t_flat['categoria'] . ' ' . ($t_flat['nome_turno'] ?? ''));
                                 $data_cat  = strtolower($t_flat['categoria']);
-                                $data_date = $t_flat['data_turno'];
+                                $data_date = (string)($t_flat['data_turno'] ?? ''); // vuoto = turno senza data
                             ?>
                             <div class="card shadow-sm border-0 adv-event-item" style="border-radius: 12px; overflow: hidden;" data-text="<?php echo htmlspecialchars($data_text); ?>" data-cat="<?php echo htmlspecialchars($data_cat); ?>" data-date="<?php echo $data_date; ?>" data-soldout="<?php echo $is_soldout_flag; ?>">
                                 <div class="row g-0">
@@ -986,7 +1054,7 @@ function evSetRating(btn) {
                                     <div class="col-md-10 p-4 d-flex flex-column justify-content-between bg-white">
                                         <div>
                                             <div class="small fw-bold mb-1" style="color: #64748b;"><i class="fa fa-folder-open me-1"></i> <?php echo htmlspecialchars($t_flat['categoria']); ?></div>
-                                            <h4 class="fw-bold text-dark mb-2" style="color: <?php echo $col_primaria; ?> !important;"><?php echo htmlspecialchars($t_flat['evento_titolo']); ?></h4>
+                                            <h2 class="fw-bold fs-4 text-dark mb-2" style="color: <?php echo $col_primaria; ?> !important;"><?php echo htmlspecialchars($t_flat['evento_titolo']); ?></h2>
                                             
                                             <!-- --- AGGIORNAMENTO UI: BOX LUOGO INGRANDITO (LISTA AVANZATA) --- -->
                                             <?php if(!empty($t_flat['evento_luogo'])): ?>
@@ -1026,6 +1094,7 @@ function evSetRating(btn) {
             const dateFrom = document.getElementById('advSearchDateFrom');
             const dateTo = document.getElementById('advSearchDateTo');
             const soldoutSelect = document.getElementById('advSearchSoldout');
+            const senzaData = document.getElementById('advSearchSenzaData');
             
             function filterEvents() {
                 const textVal = searchInput.value.toLowerCase();
@@ -1038,8 +1107,12 @@ function evSetRating(btn) {
                     let show = true;
                     if (textVal && !el.dataset.text.includes(textVal)) show = false;
                     if (catVal && el.dataset.cat !== catVal) show = false;
-                    if (fromVal && el.dataset.date < fromVal) show = false;
-                    if (toVal && el.dataset.date > toVal) show = false;
+                    // Turni senza data: esclusi dai filtri per data, mostrati se la casella è spuntata
+                    if (!el.dataset.date) { if ((fromVal || toVal) && !senzaData.checked) show = false; }
+                    else {
+                        if (fromVal && el.dataset.date < fromVal) show = false;
+                        if (toVal && el.dataset.date > toVal) show = false;
+                    }
                     if (soldoutVal === '0' && el.dataset.soldout === '1') show = false;
                     
                     if(show) { el.classList.remove('d-none'); } else { el.classList.add('d-none'); }
@@ -1052,6 +1125,7 @@ function evSetRating(btn) {
                 dateFrom.addEventListener('change', filterEvents);
                 dateTo.addEventListener('change', filterEvents);
                 soldoutSelect.addEventListener('change', filterEvents);
+                senzaData.addEventListener('change', filterEvents);
             }
         });
     </script>
@@ -1081,12 +1155,12 @@ function evSetRating(btn) {
                     <div class="timeline-group mb-5 position-relative">
                         <!-- Nodo Data -->
                         <div class="timeline-badge shadow-sm" style="position: absolute; left: -4.3rem; top: 0; width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; background-color: <?php echo $col_primaria; ?>; border: 4px solid #fff; z-index: 2;">
-                            <i class="fa fa-calendar-day fs-5"></i>
+                            <i class="fa <?php echo $data_giorno === GIORNO_SENZA_DATA ? 'fa-infinity' : 'fa-calendar-day'; ?> fs-5" aria-hidden="true"></i>
                         </div>
                         
-                        <h3 class="fw-bold mb-4 ms-2 text-dark pt-2" style="color: <?php echo $col_primaria; ?> !important;">
-                            <?php echo formattaDataItaliano($data_giorno); ?>
-                        </h3>
+                        <h2 class="fw-bold fs-3 mb-4 ms-2 text-dark pt-2" style="color: <?php echo $col_primaria; ?> !important;">
+                            <?php echo $titolo_giorno($data_giorno); ?>
+                        </h2>
                         
                         <div class="row g-4 ms-1">
                             <?php foreach ($lista_ev_giorno as $ev): ?>
@@ -1107,6 +1181,203 @@ function evSetRating(btn) {
 <!-- ======================================================= -->
 <!-- LAYOUT 6: GRUPPI / CORSI (discipline -> gruppi -> turni) -->
 <!-- ======================================================= -->
+<?php elseif ($layout_template === 'agenda'): ?>
+    <?php
+    // AGENDA A SCHEDE PER GIORNO: una scheda per ogni giorno (+ "Senza data"), turni in ordine di orario
+    $agenda = [];
+    foreach ($all_turni_flat as $t_ag) {
+        $agenda[!empty($t_ag['data_turno']) ? $t_ag['data_turno'] : GIORNO_SENZA_DATA][] = $t_ag;
+    }
+    ksort($agenda);
+    // Giorno aperto all'inizio: oggi se c'è, altrimenti il primo con turni non conclusi, altrimenti il primo
+    $giorno_attivo = isset($agenda[date('Y-m-d')]) ? date('Y-m-d') : null;
+    if ($giorno_attivo === null) {
+        foreach ($agenda as $g => $lista_g) {
+            foreach ($lista_g as $t_g) { if (!turno_concluso($t_g)) { $giorno_attivo = $g; break 2; } }
+        }
+    }
+    if ($giorno_attivo === null && $agenda) $giorno_attivo = array_key_first($agenda);
+    $giorni_brevi = ['Dom', 'Lun', 'Mar', 'Mer', 'Gio', 'Ven', 'Sab'];
+    $mesi_ag      = ['', 'gen', 'feb', 'mar', 'apr', 'mag', 'giu', 'lug', 'ago', 'set', 'ott', 'nov', 'dic'];
+    $txt_on_area  = colore_testo_su($col_primaria);
+    ?>
+    <style>
+        .ag-giorni { display: flex; gap: .5rem; overflow-x: auto; padding-bottom: .5rem; scrollbar-width: thin; }
+        .ag-giorno { flex: 0 0 auto; min-width: 84px; border: 2px solid #e2e8f0; background: #fff; border-radius: 12px; padding: .5rem .75rem; text-align: center; line-height: 1.15; cursor: pointer; }
+        .ag-giorno .ag-gs { font-size: .72rem; text-transform: uppercase; font-weight: 700; color: #64748b; }
+        .ag-giorno .ag-gn { font-size: 1.5rem; font-weight: 800; color: #1f2937; }
+        .ag-giorno .ag-gm { font-size: .72rem; font-weight: 600; color: #64748b; }
+        .ag-giorno.attivo { background: <?php echo $col_primaria; ?>; border-color: <?php echo $col_primaria; ?>; }
+        .ag-giorno.attivo * { color: <?php echo $txt_on_area; ?> !important; }
+        .ag-riga { display: grid; grid-template-columns: 92px 1fr auto; gap: 1rem; align-items: center; padding: 1rem 1.25rem; border-bottom: 1px solid #eef2f7; }
+        .ag-riga:last-child { border-bottom: 0; }
+        .ag-riga.conclusa { opacity: .55; }
+        .ag-ora { font-size: 1.35rem; font-weight: 800; color: <?php echo $col_testo_area; ?>; line-height: 1; }
+        .ag-ora small { display: block; font-size: .78rem; font-weight: 600; color: #64748b; margin-top: .25rem; }
+        @media (max-width: 575.98px) {
+            .ag-riga { grid-template-columns: 64px 1fr; }
+            .ag-riga .ag-azione { grid-column: 1 / -1; }
+            .ag-ora { font-size: 1.1rem; }
+        }
+    </style>
+    <div class="container mb-5" style="max-width: <?php echo htmlspecialchars($page_cfg['larghezza_contenitore'] ?? '85%'); ?>;">
+        <div class="text-center mb-4 mt-4">
+            <h1 class="fw-black display-5 m-0 my-2" style="color: <?php echo $col_testo_area; ?>; font-weight: 900; letter-spacing: -1px;">
+                <?php echo htmlspecialchars(!empty($page_cfg['titolo']) ? $page_cfg['titolo'] : 'AGENDA'); ?>
+            </h1>
+            <?php if (!empty($page_cfg['hero_descrizione'])): ?>
+                <div class="text-secondary fs-5 mx-auto" style="max-width: 760px;"><?php echo $page_cfg['hero_descrizione']; ?></div>
+            <?php endif; ?>
+        </div>
+
+        <?php if (!empty($page_cfg['box_info_html'])): ?>
+            <div class="card shadow-sm border-0 p-4 mb-4" style="border-left: 5px solid <?php echo $col_primaria; ?> !important; border-radius: 8px;">
+                <div class="fs-6 text-dark" style="line-height: 1.7;"><?php echo $page_cfg['box_info_html']; ?></div>
+            </div>
+        <?php endif; ?>
+
+        <?php if (!$agenda): ?>
+            <div class="alert alert-light text-center border p-4 shadow-sm">Nessuna attività in programma.</div>
+        <?php else: ?>
+            <!-- Selettore giorni -->
+            <div class="ag-giorni mb-3" role="tablist" aria-label="Giorni del programma">
+                <?php foreach ($agenda as $g => $lista_g):
+                    $attivo = ($g === $giorno_attivo);
+                    $id_g = 'ag-' . preg_replace('/[^0-9]/', '', $g);
+                ?>
+                    <button type="button" class="ag-giorno<?php echo $attivo ? ' attivo' : ''; ?>" role="tab" id="tab-<?php echo $id_g; ?>"
+                            aria-selected="<?php echo $attivo ? 'true' : 'false'; ?>" aria-controls="<?php echo $id_g; ?>" tabindex="<?php echo $attivo ? '0' : '-1'; ?>">
+                        <?php if ($g === GIORNO_SENZA_DATA): ?>
+                            <div class="ag-gs">Senza</div><div class="ag-gn"><i class="fa fa-infinity" aria-hidden="true"></i></div><div class="ag-gm">data fissa</div>
+                        <?php else: $ts_g = strtotime($g); ?>
+                            <div class="ag-gs"><?php echo $g === date('Y-m-d') ? 'Oggi' : $giorni_brevi[(int)date('w', $ts_g)]; ?></div>
+                            <div class="ag-gn"><?php echo date('j', $ts_g); ?></div>
+                            <div class="ag-gm"><?php echo $mesi_ag[(int)date('n', $ts_g)] . (date('Y', $ts_g) !== date('Y') ? ' ' . date('Y', $ts_g) : ''); ?></div>
+                        <?php endif; ?>
+                        <span class="visually-hidden"><?php echo count($lista_g); ?> attività</span>
+                    </button>
+                <?php endforeach; ?>
+            </div>
+
+            <!-- Filtri -->
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+                <label for="agCerca" class="visually-hidden">Cerca attività</label>
+                <input type="search" id="agCerca" class="form-control form-control-sm" style="max-width: 280px;" placeholder="Cerca attività, luogo...">
+                <div class="form-check form-switch mb-0 ms-md-auto">
+                    <input class="form-check-input" type="checkbox" id="agSoloLiberi">
+                    <label class="form-check-label small fw-bold" for="agSoloLiberi">Solo con posti liberi</label>
+                </div>
+            </div>
+
+            <!-- Pannelli dei giorni -->
+            <?php foreach ($agenda as $g => $lista_g):
+                $id_g = 'ag-' . preg_replace('/[^0-9]/', '', $g);
+                usort($lista_g, fn($a, $b) => strcmp(($a['orario_inizio'] ?? '99') . $a['evento_titolo'], ($b['orario_inizio'] ?? '99') . $b['evento_titolo']));
+            ?>
+                <div class="card shadow-sm border-0 rounded-4 overflow-hidden" role="tabpanel" id="<?php echo $id_g; ?>" aria-labelledby="tab-<?php echo $id_g; ?>" <?php echo $g === $giorno_attivo ? '' : 'hidden'; ?>>
+                    <div class="px-4 py-3 border-bottom bg-light">
+                        <h2 class="fw-bold fs-5 m-0"><?php echo $titolo_giorno($g); ?></h2>
+                    </div>
+                    <?php foreach ($lista_g as $t_ag):
+                        $conclusa  = turno_concluso($t_ag);
+                        $req_pren  = (int)($t_ag['richiede_prenotazione'] ?? 1) === 1;
+                        $occ_ag    = $req_pren ? getPostiOccupati($conn, $t_ag['id']) : 0;
+                        $max_ag    = max(0, (int)$t_ag['max_posti']);
+                        $lib_ag    = max(0, $max_ag - $occ_ag);
+                        $illimitato = $max_ag >= 9000;
+                        $pct_ag    = ($max_ag > 0 && !$illimitato) ? min(100, (int)round($occ_ag / $max_ag * 100)) : 0;
+                        $mio_stato = $mie_iscrizioni[(int)$t_ag['evento_id']][(int)$t_ag['id']] ?? null;
+                        $cerca_ag  = mb_strtolower($t_ag['evento_titolo'] . ' ' . ($t_ag['nome_turno'] ?? '') . ' ' . ($t_ag['evento_luogo'] ?? '') . ' ' . $t_ag['categoria']);
+                    ?>
+                        <div class="ag-riga<?php echo $conclusa ? ' conclusa' : ''; ?>" data-cerca="<?php echo htmlspecialchars($cerca_ag); ?>" data-liberi="<?php echo (!$req_pren || $illimitato) ? 1 : $lib_ag; ?>">
+                            <div class="ag-ora">
+                                <?php if (!empty($t_ag['orario_inizio'])): ?>
+                                    <?php echo substr($t_ag['orario_inizio'], 0, 5); ?>
+                                    <?php if (!empty($t_ag['orario_fine'])): ?><small>fino alle <?php echo substr($t_ag['orario_fine'], 0, 5); ?></small><?php endif; ?>
+                                <?php else: ?>
+                                    <i class="fa fa-clock" aria-hidden="true"></i><small>orario da definire</small>
+                                <?php endif; ?>
+                            </div>
+                            <div style="min-width: 0;">
+                                <div class="d-flex flex-wrap gap-1 mb-1">
+                                    <span class="badge" style="background: #f1f5f9; color: #334155; font-size: .68rem;"><?php echo htmlspecialchars($t_ag['categoria']); ?></span>
+                                    <?php if ($mio_stato === 'in_attesa' || $mio_stato === 'richiesta_conferma'): ?>
+                                        <span class="badge bg-warning text-dark" style="font-size: .68rem;"><i class="fa fa-hourglass-half me-1" aria-hidden="true"></i>In lista d'attesa</span>
+                                    <?php elseif ($mio_stato !== null): ?>
+                                        <span class="badge bg-success" style="font-size: .68rem;"><i class="fa fa-check me-1" aria-hidden="true"></i>Sei iscritto</span>
+                                    <?php endif; ?>
+                                </div>
+                                <h3 class="fw-bold fs-6 m-0 text-dark"><?php echo htmlspecialchars($t_ag['evento_titolo']); ?><?php if (!empty($t_ag['nome_turno'])): ?> <span class="fw-semibold text-secondary">· <?php echo htmlspecialchars($t_ag['nome_turno']); ?></span><?php endif; ?></h3>
+                                <?php if (!empty($t_ag['evento_luogo'])): ?>
+                                    <div class="small text-secondary mt-1"><i class="fa fa-map-marker-alt me-1" aria-hidden="true"></i><?php echo htmlspecialchars($t_ag['evento_luogo']); ?></div>
+                                <?php endif; ?>
+                                <?php if ($req_pren && !$illimitato && $max_ag > 0 && !$conclusa): ?>
+                                    <div class="d-flex align-items-center gap-2 mt-2" style="max-width: 320px;">
+                                        <div class="progress flex-grow-1" style="height: 6px;" role="progressbar" aria-label="Posti occupati: <?php echo $pct_ag; ?>%" aria-valuenow="<?php echo $pct_ag; ?>" aria-valuemin="0" aria-valuemax="100">
+                                            <div class="progress-bar <?php echo $pct_ag >= 100 ? 'bg-danger' : ($pct_ag >= 75 ? 'bg-warning' : 'bg-success'); ?>" style="width: <?php echo $pct_ag; ?>%;"></div>
+                                        </div>
+                                        <span class="small fw-bold text-nowrap <?php echo $lib_ag > 0 ? 'text-success' : 'text-danger'; ?>"><?php echo $lib_ag > 0 ? $lib_ag . ($lib_ag === 1 ? ' posto' : ' posti') : 'Completo'; ?></span>
+                                    </div>
+                                <?php endif; ?>
+                            </div>
+                            <div class="ag-azione text-end">
+                                <?php if ($mio_stato !== null && !in_array($mio_stato, ['in_attesa', 'richiesta_conferma'], true)): ?>
+                                    <a href="area_personale.php" class="btn btn-sm btn-outline-success fw-bold">La mia prenotazione</a>
+                                <?php else: ?>
+                                    <?php echo getPulsanteAzione($t_ag, $col_primaria, $utente_logged, $utente_ruolo_id, $conn, $nomi_ruoli); ?>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                    <div class="ag-vuoto p-4 text-center text-muted d-none">Nessuna attività corrisponde ai filtri in questo giorno.</div>
+                </div>
+            <?php endforeach; ?>
+
+            <script>
+            document.addEventListener('DOMContentLoaded', function () {
+                var tabs = Array.prototype.slice.call(document.querySelectorAll('.ag-giorno'));
+                function apri(tab) {
+                    tabs.forEach(function (t) {
+                        var sel = t === tab;
+                        t.classList.toggle('attivo', sel);
+                        t.setAttribute('aria-selected', sel ? 'true' : 'false');
+                        t.tabIndex = sel ? 0 : -1;
+                        document.getElementById(t.getAttribute('aria-controls')).hidden = !sel;
+                    });
+                    filtra();
+                }
+                tabs.forEach(function (t, i) {
+                    t.addEventListener('click', function () { apri(t); });
+                    // Tastiera: frecce sinistra/destra tra i giorni (pattern ARIA delle schede)
+                    t.addEventListener('keydown', function (e) {
+                        var j = e.key === 'ArrowRight' ? i + 1 : e.key === 'ArrowLeft' ? i - 1 : null;
+                        if (j === null || !tabs[j]) return;
+                        e.preventDefault(); tabs[j].focus(); apri(tabs[j]);
+                    });
+                });
+                var attiva = document.querySelector('.ag-giorno.attivo');
+                if (attiva) attiva.scrollIntoView({ block: 'nearest', inline: 'center' });
+
+                var cerca = document.getElementById('agCerca'), liberi = document.getElementById('agSoloLiberi');
+                function filtra() {
+                    var q = cerca.value.trim().toLowerCase(), soloLiberi = liberi.checked;
+                    document.querySelectorAll('[role="tabpanel"]').forEach(function (p) {
+                        var visibili = 0;
+                        p.querySelectorAll('.ag-riga').forEach(function (r) {
+                            var ok = (!q || r.dataset.cerca.indexOf(q) !== -1) && (!soloLiberi || parseInt(r.dataset.liberi, 10) > 0);
+                            r.classList.toggle('d-none', !ok);
+                            if (ok) visibili++;
+                        });
+                        p.querySelector('.ag-vuoto').classList.toggle('d-none', visibili > 0);
+                    });
+                }
+                cerca.addEventListener('input', filtra);
+                liberi.addEventListener('change', filtra);
+            });
+            </script>
+        <?php endif; ?>
+    </div>
+
 <?php elseif ($layout_template === 'gruppi'): ?>
     <style>
         .gruppo-card { border-top: 4px solid <?php echo $col_primaria; ?> !important; border-radius: 12px; transition: box-shadow .2s ease; }
@@ -1143,7 +1414,7 @@ function evSetRating(btn) {
         </div>
 
         <?php if (!empty($page_cfg['box_info_html']) || !empty($page_cfg['allegati_box_info'])): ?>
-            <div class="card shadow-sm border-0 p-4 mb-4" style="border-left: 5px solid #B30000 !important; border-radius: 8px;">
+            <div class="card shadow-sm border-0 p-4 mb-4" style="border-left: 5px solid <?php echo $col_primaria; ?> !important; border-radius: 8px;">
                 <?php if (!empty($page_cfg['box_info_html'])): ?><div class="fs-6 text-dark" style="line-height: 1.7;"><?php echo $page_cfg['box_info_html']; ?></div><?php endif; ?>
                 <?php if (!empty($page_cfg['allegati_box_info'])): ?>
                     <div class="mt-3 pt-3 border-top d-flex flex-wrap gap-2">
@@ -1174,10 +1445,10 @@ function evSetRating(btn) {
 
             <?php foreach ($eventi_per_categoria as $cat_nome => $lista_gruppi): ?>
                 <section class="gruppi-sezione mb-5" data-cat="<?php echo htmlspecialchars($cat_nome); ?>">
-                    <h3 class="fw-bold fs-4 border-bottom pb-2 mb-3" style="color: <?php echo $col_primaria; ?>;">
+                    <h2 class="fw-bold fs-4 border-bottom pb-2 mb-3" style="color: <?php echo $col_primaria; ?>;">
                         <i class="fa fa-people-group me-2"></i><?php echo htmlspecialchars($cat_nome); ?>
                         <span class="badge bg-light text-secondary border ms-2 align-middle" style="font-size: .75rem;"><?php echo count($lista_gruppi); ?> <?php echo count($lista_gruppi) === 1 ? 'gruppo' : 'gruppi'; ?></span>
-                    </h3>
+                    </h2>
                     <div class="row g-4">
                         <?php foreach ($lista_gruppi as $ev):
                             $ev_id = (int)$ev['id'];
@@ -1209,7 +1480,7 @@ function evSetRating(btn) {
                                     <?php endif; ?>
                                     <div class="card-body p-4 d-flex flex-column">
                                         <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
-                                            <h5 class="fw-bold m-0" style="color: <?php echo $col_primaria; ?>;"><?php echo htmlspecialchars($ev['titolo']); ?></h5>
+                                            <h3 class="fw-bold fs-5 m-0" style="color: <?php echo $col_primaria; ?>;"><?php echo htmlspecialchars($ev['titolo']); ?></h3>
                                             <div class="d-flex flex-column align-items-end gap-1">
                                                 <?php if ($iscritto_ev): ?><span class="badge bg-success"><i class="fa fa-check me-1"></i>Iscritto</span><?php endif; ?>
                                                 <?php if ($ruolo_ev === -1): ?><span class="badge bg-warning text-dark">🔑 Solo Autenticati</span>
@@ -1348,7 +1619,7 @@ function evSetRating(btn) {
                     <div>
                         <?php if (!empty($page_cfg['sidebar_intervallo_date'])): ?><div class="d-inline-block badge bg-warning text-dark fw-bold px-3 py-1 fs-6 rounded-pill mb-2 border shadow-sm">📝 <?php echo htmlspecialchars($page_cfg['sidebar_intervallo_date']); ?></div><?php endif; ?>
                         <h1 class="fw-bold display-5 m-0 my-1" style="color: <?php echo $col_primaria; ?>; font-weight: 900; letter-spacing: -1px;"><?php echo htmlspecialchars(!empty($page_cfg['titolo']) ? $page_cfg['titolo'] : 'EVENTI'); ?></h1>
-                        <h2 class="fw-bold fs-3 text-danger mb-0" style="color: #B30000 !important; letter-spacing: 2px;"><?php echo htmlspecialchars(!empty($page_cfg['sottotitolo']) ? $page_cfg['sottotitolo'] : 'DiBEST'); ?></h2>
+                        <h2 class="fw-bold fs-3 mb-0" style="color: <?php echo $col_testo_area; ?> !important; letter-spacing: 2px;"><?php echo htmlspecialchars(!empty($page_cfg['sottotitolo']) ? $page_cfg['sottotitolo'] : 'DiBEST'); ?></h2>
                     </div>
                     <div class="mt-auto pt-3 w-100 text-center" style="color: <?php echo $col_primaria; ?>;">
                         <?php if (!empty($page_cfg['hero_banner_path'])): ?><img src="uploads/<?php echo htmlspecialchars(basename($page_cfg['hero_banner_path'])); ?>" class="img-fluid mt-auto" style="max-height: 100px; object-fit: contain;" alt="Banner Custom"><?php else: ?><svg viewBox="0 0 500 80" class="w-100 mt-auto" style="max-height: 60px;" fill="currentColor"><path d="M10,80 L35,40 L60,80 Z M30,50 L40,80 Z"></path><circle cx="48" cy="42" r="3"></circle><path d="M70,80 C70,60 85,50 100,50 C115,50 120,60 120,80 Z"></path><path d="M130,80 C130,55 145,40 160,40 C175,40 190,55 190,80 Z"></path><circle cx="210" cy="50" r="4"></circle><path d="M210,55 L210,75 M203,62 L217,62 M205,80 L210,75 L215,80"></path><circle cx="225" cy="45" r="4"></circle><path d="M225,50 L225,72 M218,55 L232,55 M220,80 L225,72 L230,80"></path><circle cx="240" cy="48" r="4"></circle><path d="M240,53 L240,75 M233,60 L247,60 M235,80 L240,75 L245,80"></path><circle cx="255" cy="42" r="4"></circle><path d="M255,47 L255,70 M248,52 L262,52 M250,80 L255,70 L260,80"></path><path d="M320,80 L320,50 L360,50 L360,80 Z M330,80 L330,60 L350,60 L350,80 Z M340,40 L320,50 L360,50 Z"></path></svg><?php endif; ?>
@@ -1387,7 +1658,7 @@ function evSetRating(btn) {
         <?php endif; ?>
 
         <?php if (!empty($page_cfg['box_info_html']) || !empty($page_cfg['allegati_box_info'])): ?>
-            <div class="card shadow-sm border-0 p-4 mb-4" style="border-left: 5px solid #B30000 !important; background: #ffffff; border-radius: 8px;">
+            <div class="card shadow-sm border-0 p-4 mb-4" style="border-left: 5px solid <?php echo $col_primaria; ?> !important; background: #ffffff; border-radius: 8px;">
                 <?php if (!empty($page_cfg['box_info_html'])): ?>
                     <div class="fs-6 text-dark" style="line-height: 1.7;"><?php echo $page_cfg['box_info_html']; ?></div>
                 <?php endif; ?>
@@ -1414,7 +1685,7 @@ function evSetRating(btn) {
             <div class="row g-4 mt-1 align-items-start">
                 <div class="col-lg-3">
                     <div class="card shadow-sm border-0 p-4 text-center sidebar-sticky-fix" style="border-top: 4px solid <?php echo $col_primaria; ?> !important; border-radius: 8px; background: #ffffff;">
-                        <h4 class="fw-bold mb-2" style="color: <?php echo $col_primaria; ?>;"><?php echo htmlspecialchars(!empty($page_cfg['sidebar_titolo']) ? $page_cfg['sidebar_titolo'] : 'Scegli il tuo evento'); ?></h4>
+                        <h3 class="fw-bold fs-4 mb-2" style="color: <?php echo $col_primaria; ?>;"><?php echo htmlspecialchars(!empty($page_cfg['sidebar_titolo']) ? $page_cfg['sidebar_titolo'] : 'Scegli il tuo evento'); ?></h3>
                         <?php if (!empty($page_cfg['sidebar_intervallo_date'])): ?>
                             <div class="badge bg-danger p-2 fs-6 mb-3">📅 <?php echo htmlspecialchars($page_cfg['sidebar_intervallo_date']); ?></div>
                         <?php endif; ?>
@@ -1442,7 +1713,7 @@ function evSetRating(btn) {
                 <div class="col-lg-9">
                     <?php if ($layout_template == 'list'): ?>
                         <?php foreach ($eventi_per_data as $data_giorno => $lista_ev_giorno): ?>
-                            <h3 class="fw-bold mb-3 fs-3 text-dark border-bottom pb-2"><?php echo formattaDataItaliano($data_giorno); ?></h3>
+                            <h3 class="fw-bold mb-3 fs-3 text-dark border-bottom pb-2"><?php echo $titolo_giorno($data_giorno); ?></h3>
                             <div class="row g-4 mb-5">
                                 <?php $dinamic_col = (count($lista_ev_giorno) == 1) ? 'col-12' : $col_class; ?>
                                 <?php foreach ($lista_ev_giorno as $ev): ?>
@@ -1457,19 +1728,21 @@ function evSetRating(btn) {
                         <div class="row g-4 mb-4 align-items-start">
                             <?php foreach ($sezioni_superiori as $nome_sezione => $lista_ev_sup): ?>
                                 <div class="col-md-6 mb-2">
-                                    <div class="p-3 mb-3 rounded shadow-sm text-center text-white text-uppercase fw-bold fs-6" style="background-color: <?php echo $col_primaria; ?>; letter-spacing: 1px;"><?php echo htmlspecialchars($nome_sezione); ?></div>
+                                    <h2 class="p-3 mb-3 rounded shadow-sm text-center text-uppercase fw-bold fs-6" style="background-color: <?php echo $col_primaria; ?>; color: <?php echo colore_testo_su($col_primaria); ?>; letter-spacing: 1px;"><?php echo htmlspecialchars($nome_sezione); ?></h2>
                                     <div class="row g-4">
                                         <?php foreach ($lista_ev_sup as $ev): ?><div class="col-12"><?php renderCardUniversal($ev, $col_primaria, $utente_logged, $utente_ruolo_id, $nomi_ruoli, $etichette_riservato, $val_nome, $val_cognome, $val_email, $val_matricola, $conn, $chiedi_matricola); ?></div><?php endforeach; ?>
                                     </div>
                                 </div>
                             <?php endforeach; ?>
                         </div>
-                        <?php if (!empty($eventi_macro)): ?>
-                            <div class="p-3 my-4 rounded shadow-sm text-center text-white text-uppercase fw-bold fs-5" style="background-color: <?php echo $col_primaria; ?>; letter-spacing: 1px;">MODULI DIDATTICI DELLE MACRO-AREE</div>
+                        <?php foreach ($gruppi_griglia as $nome_gruppo => $lista_gruppo): $tit_g = $titolo_gruppo_griglia((string)$nome_gruppo); ?>
+                            <?php if ($tit_g !== ''): ?>
+                                <h2 class="p-3 my-4 rounded shadow-sm text-center text-uppercase fw-bold fs-5" style="background-color: <?php echo $col_primaria; ?>; color: <?php echo colore_testo_su($col_primaria); ?>; letter-spacing: 1px;"><?php echo htmlspecialchars($tit_g); ?></h2>
+                            <?php endif; ?>
                             <div class="row g-4 mb-4">
-                                <?php foreach ($eventi_macro as $ev): ?><div class="<?php echo $col_class; ?>"><?php renderCardUniversal($ev, $col_primaria, $utente_logged, $utente_ruolo_id, $nomi_ruoli, $etichette_riservato, $val_nome, $val_cognome, $val_email, $val_matricola, $conn, $chiedi_matricola); ?></div><?php endforeach; ?>
+                                <?php foreach ($lista_gruppo as $ev): ?><div class="<?php echo $col_class; ?>"><?php renderCardUniversal($ev, $col_primaria, $utente_logged, $utente_ruolo_id, $nomi_ruoli, $etichette_riservato, $val_nome, $val_cognome, $val_email, $val_matricola, $conn, $chiedi_matricola); ?></div><?php endforeach; ?>
                             </div>
-                        <?php endif; ?>
+                        <?php endforeach; ?>
                     <?php endif; ?>
                 </div>
             </div>
@@ -1477,7 +1750,7 @@ function evSetRating(btn) {
             <!-- SENZA SIDEBAR -->
             <?php if ($layout_template == 'list'): ?>
                 <?php foreach ($eventi_per_data as $data_giorno => $lista_ev_giorno): ?>
-                    <h3 class="fw-bold mb-3 fs-3 text-dark border-bottom pb-2"><?php echo formattaDataItaliano($data_giorno); ?></h3>
+                    <h3 class="fw-bold mb-3 fs-3 text-dark border-bottom pb-2"><?php echo $titolo_giorno($data_giorno); ?></h3>
                     <div class="row g-4 mb-5">
                         <?php $dinamic_col = (count($lista_ev_giorno) == 1) ? 'col-12' : $col_class; ?>
                         <?php foreach ($lista_ev_giorno as $ev): ?>
@@ -1492,19 +1765,21 @@ function evSetRating(btn) {
                 <div class="row g-4 mb-4 align-items-start">
                     <?php foreach ($sezioni_superiori as $nome_sezione => $lista_ev_sup): ?>
                         <div class="col-md-6 mb-2">
-                            <div class="p-3 mb-3 rounded shadow-sm text-center text-white text-uppercase fw-bold fs-6" style="background-color: <?php echo $col_primaria; ?>; letter-spacing: 1px;"><?php echo htmlspecialchars($nome_sezione); ?></div>
+                            <h2 class="p-3 mb-3 rounded shadow-sm text-center text-uppercase fw-bold fs-6" style="background-color: <?php echo $col_primaria; ?>; color: <?php echo colore_testo_su($col_primaria); ?>; letter-spacing: 1px;"><?php echo htmlspecialchars($nome_sezione); ?></h2>
                             <div class="row g-4">
                                 <?php foreach ($lista_ev_sup as $ev): ?><div class="col-12"><?php renderCardUniversal($ev, $col_primaria, $utente_logged, $utente_ruolo_id, $nomi_ruoli, $etichette_riservato, $val_nome, $val_cognome, $val_email, $val_matricola, $conn, $chiedi_matricola); ?></div><?php endforeach; ?>
                             </div>
                         </div>
                     <?php endforeach; ?>
                 </div>
-                <?php if (!empty($eventi_macro)): ?>
-                    <div class="p-3 my-4 rounded shadow-sm text-center text-white text-uppercase fw-bold fs-5" style="background-color: <?php echo $col_primaria; ?>; letter-spacing: 1px;">MODULI DIDATTICI DELLE MACRO-AREE</div>
+                <?php foreach ($gruppi_griglia as $nome_gruppo => $lista_gruppo): $tit_g = $titolo_gruppo_griglia((string)$nome_gruppo); ?>
+                    <?php if ($tit_g !== ''): ?>
+                        <h2 class="p-3 my-4 rounded shadow-sm text-center text-uppercase fw-bold fs-5" style="background-color: <?php echo $col_primaria; ?>; color: <?php echo colore_testo_su($col_primaria); ?>; letter-spacing: 1px;"><?php echo htmlspecialchars($tit_g); ?></h2>
+                    <?php endif; ?>
                     <div class="row g-4 mb-4">
-                        <?php foreach ($eventi_macro as $ev): ?><div class="<?php echo $col_class; ?>"><?php renderCardUniversal($ev, $col_primaria, $utente_logged, $utente_ruolo_id, $nomi_ruoli, $etichette_riservato, $val_nome, $val_cognome, $val_email, $val_matricola, $conn, $chiedi_matricola); ?></div><?php endforeach; ?>
+                        <?php foreach ($lista_gruppo as $ev): ?><div class="<?php echo $col_class; ?>"><?php renderCardUniversal($ev, $col_primaria, $utente_logged, $utente_ruolo_id, $nomi_ruoli, $etichette_riservato, $val_nome, $val_cognome, $val_email, $val_matricola, $conn, $chiedi_matricola); ?></div><?php endforeach; ?>
                     </div>
-                <?php endif; ?>
+                <?php endforeach; ?>
             <?php endif; ?>
         <?php endif; ?>
     </div>

@@ -4,6 +4,7 @@
 # Cache runtime (file generati automaticamente)
 cache/*.json
 cache/*.lock
+cache/*.ok
 
 # Uploads utenti (non versionare file caricati)
 uploads/*

@@ -10,6 +10,9 @@ if (!$can_manage_eventi) {
 
 function admin_redirect($url) { echo "<script>window.location.replace('$url');</script>"; exit; }
 
+// Filtro evento anche nei POST (i form lo inviano come campo nascosto), per tornare alla stessa vista
+$filtro_ev = isset($_GET['f_ev']) ? (int)$_GET['f_ev'] : (int)($_POST['f_ev'] ?? 0);
+
 // Mostra l'errore invece della pagina bianca
 set_exception_handler(function (Throwable $e) {
     error_log('[admin/eventi.php] ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine());
@@ -42,13 +45,131 @@ function inserisci_turno($conn, int $ev_id, array $t): void {
     $stmt->execute();
 }
 
+// RBAC: evento/turno toccabili solo se dell'area corrente e visibili al gestore ($sql_filtro_eventi_rbac)
+function ev_autorizzato($conn, int $ev_id, int $p_id, string $rbac): bool {
+    $r = $conn->query("SELECT 1 FROM eventi e WHERE e.id = $ev_id AND e.pagina_id = $p_id $rbac LIMIT 1");
+    return $r && $r->num_rows > 0;
+}
+function turno_autorizzato($conn, int $t_id, int $p_id, string $rbac): bool {
+    $r = $conn->query("SELECT 1 FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = $t_id AND e.pagina_id = $p_id $rbac LIMIT 1");
+    return $r && $r->num_rows > 0;
+}
+function nega_accesso(): void { http_response_code(403); die("Accesso negato."); }
+
+// Colonne di una tabella (escluso id): la copia resta corretta anche se lo schema cambia
+function colonne_copiabili($conn, string $tabella, array $escludi = []): array {
+    $cols = [];
+    $r = $conn->query("SHOW COLUMNS FROM `$tabella`");
+    if ($r) while ($c = $r->fetch_assoc()) if ($c['Field'] !== 'id' && !in_array($c['Field'], $escludi, true)) $cols[] = $c['Field'];
+    return $cols;
+}
+
+// Duplica un turno (stessi dati, nessuna prenotazione) nell'evento indicato. Ritorna il nuovo id.
+function duplica_turno($conn, int $t_id, int $ev_dest, bool $segna_copia): int {
+    $cols = colonne_copiabili($conn, 'turni', ['evento_id', 'nome_turno']);
+    $lista = implode(', ', array_map(fn($c) => "`$c`", $cols));
+    $nome  = $segna_copia ? "IF(nome_turno IS NULL OR nome_turno = '', NULL, CONCAT(nome_turno, ' (copia)'))" : 'nome_turno';
+    $conn->query("INSERT INTO turni (evento_id, nome_turno, $lista) SELECT $ev_dest, $nome, $lista FROM turni WHERE id = $t_id");
+    return (int)$conn->insert_id;
+}
+
+if (isset($_POST['duplica_turno'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
+    $t_id = (int)$_POST['duplica_turno'];
+    if (!turno_autorizzato($conn, $t_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
+    $r_ev = $conn->query("SELECT evento_id FROM turni WHERE id = $t_id");
+    $ev_id = (int)($r_ev->fetch_assoc()['evento_id'] ?? 0);
+    $nuovo = duplica_turno($conn, $t_id, $ev_id, true);
+    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Duplicazione Turno", ["Turno origine" => $t_id, "Nuovo turno" => $nuovo]);
+    flash_set("Turno duplicato: modifica ora data e orari della copia.");
+    admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev&apri=modTurno$nuovo");
+}
+
+if (isset($_POST['duplica_evento'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
+    $ev_id = (int)$_POST['duplica_evento'];
+    if (!ev_autorizzato($conn, $ev_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
+    $conn->begin_transaction();
+    try {
+        // Evento: tutte le colonne, titolo "(copia)", non archiviato
+        $cols  = colonne_copiabili($conn, 'eventi', ['titolo', 'archiviato']);
+        $lista = implode(', ', array_map(fn($c) => "`$c`", $cols));
+        if (!$conn->query("INSERT INTO eventi (titolo, archiviato, $lista) SELECT CONCAT(titolo, ' (copia)'), 0, $lista FROM eventi WHERE id = $ev_id")) {
+            throw new RuntimeException($conn->error);
+        }
+        $nuovo_ev = (int)$conn->insert_id;
+        // Turni (senza prenotazioni)
+        $n_turni = 0;
+        $r_t = $conn->query("SELECT id FROM turni WHERE evento_id = $ev_id ORDER BY id");
+        while ($r_t && $t = $r_t->fetch_assoc()) { duplica_turno($conn, (int)$t['id'], $nuovo_ev, false); $n_turni++; }
+        // Campi del form specifici dell'evento
+        $cols_cf  = colonne_copiabili($conn, 'campi_form', ['evento_id']);
+        $lista_cf = implode(', ', array_map(fn($c) => "`$c`", $cols_cf));
+        $conn->query("INSERT INTO campi_form (evento_id, $lista_cf) SELECT $nuovo_ev, $lista_cf FROM campi_form WHERE evento_id = $ev_id");
+
+        // Sondaggi con le domande (senza risposte). La copia parte NON attiva: si attiva quando serve.
+        // Le condizioni "mostra se" vengono ricollegate alle domande nuove.
+        $n_sond = 0;
+        $cols_s  = colonne_copiabili($conn, 'sondaggi', ['evento_id', 'attivo']);
+        $lista_s = implode(', ', array_map(fn($c) => "`$c`", $cols_s));
+        $cols_d  = colonne_copiabili($conn, 'sondaggi_domande', ['sondaggio_id']);
+        $lista_d = implode(', ', array_map(fn($c) => "`$c`", $cols_d));
+        $r_s = $conn->query("SELECT id FROM sondaggi WHERE evento_id = $ev_id ORDER BY id");
+        while ($r_s && $s = $r_s->fetch_assoc()) {
+            $vecchio_s = (int)$s['id'];
+            $sql_s = "INSERT INTO sondaggi (evento_id, attivo" . ($lista_s !== '' ? ", $lista_s" : '') . ") SELECT $nuovo_ev, 0" . ($lista_s !== '' ? ", $lista_s" : '') . " FROM sondaggi WHERE id = $vecchio_s";
+            if (!$conn->query($sql_s)) throw new RuntimeException($conn->error);
+            $nuovo_s = (int)$conn->insert_id;
+            $n_sond++;
+
+            $mappa_dom = [];
+            $r_d = $conn->query("SELECT id FROM sondaggi_domande WHERE sondaggio_id = $vecchio_s ORDER BY id");
+            while ($r_d && $d = $r_d->fetch_assoc()) {
+                $vecchia_d = (int)$d['id'];
+                if (!$conn->query("INSERT INTO sondaggi_domande (sondaggio_id, $lista_d) SELECT $nuovo_s, $lista_d FROM sondaggi_domande WHERE id = $vecchia_d")) {
+                    throw new RuntimeException($conn->error);
+                }
+                $mappa_dom[$vecchia_d] = (int)$conn->insert_id;
+            }
+            foreach ($mappa_dom as $nuova_d) {
+                $r_c = $conn->query("SELECT condizione_json FROM sondaggi_domande WHERE id = $nuova_d");
+                $cond = ($r_c && $rc = $r_c->fetch_assoc()) ? json_decode((string)$rc['condizione_json'], true) : null;
+                if (!is_array($cond) || !isset($cond['se_id'])) continue;
+                $cond['se_id'] = $mappa_dom[(int)$cond['se_id']] ?? 0;
+                $nuovo_json = $cond['se_id'] > 0 ? "'" . $conn->real_escape_string(json_encode($cond)) . "'" : 'NULL';
+                $conn->query("UPDATE sondaggi_domande SET condizione_json = $nuovo_json WHERE id = $nuova_d");
+            }
+        }
+        $conn->commit();
+    } catch (Throwable $e) {
+        $conn->rollback();
+        error_log('[duplica_evento] ' . $e->getMessage());
+        flash_set("Duplicazione non riuscita: " . htmlspecialchars($e->getMessage()), 'danger');
+        admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
+    }
+    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Duplicazione Evento", ["Evento origine" => $ev_id, "Nuovo evento" => $nuovo_ev, "Turni" => $n_turni, "Sondaggi" => $n_sond]);
+    flash_set("Evento duplicato con $n_turni turni" . ($n_sond ? " e $n_sond sondaggio" . ($n_sond > 1 ? "i" : "") . " (da attivare)" : "") . ", senza iscritti: controlla titolo e date della copia.");
+    admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev&apri=modEv$nuovo_ev");
+}
+
+
+// Sezione "affiancata in alto" nel layout Griglia (attiva/disattiva)
+if (isset($_POST['toggle_sezione_alto'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
+    $sub_id = (int)$_POST['toggle_sezione_alto'];
+    $val = (int)($_POST['val'] ?? 0) === 1 ? 1 : 0;
+    $conn->query("UPDATE sottocategorie SET affiancata_in_alto = $val WHERE id = $sub_id AND pagina_id = $filtro_p");
+    flash_set($val ? "La sezione sarà mostrata in alto, affiancata alle altre (layout Griglia)." : "La sezione tornerà nell'elenco normale.");
+    admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
+}
 if (isset($_POST['add_sottocategoria'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
-    $p_id = (int)($_POST['pagina_id'] ?? $filtro_p);
+    $p_id = $filtro_p; // i permessi sono calcolati sull'area corrente: non fidarsi del campo POST
     $nome_sub = $_POST['nome_sottocategoria'] ?? '';
     $ord_sub = (int)($_POST['ordine_sottocategoria'] ?? 0);
-    $stmt = $conn->prepare("INSERT INTO sottocategorie (pagina_id, nome, ordine) VALUES (?, ?, ?)");
-    $stmt->bind_param("isi", $p_id, $nome_sub, $ord_sub);
+    $affiancata = isset($_POST['affiancata_in_alto']) ? 1 : 0;
+    $stmt = $conn->prepare("INSERT INTO sottocategorie (pagina_id, nome, ordine, affiancata_in_alto) VALUES (?, ?, ?, ?)");
+    $stmt->bind_param("isii", $p_id, $nome_sub, $ord_sub, $affiancata);
     $stmt->execute();
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Creazione Sezione", ["Nome" => $_POST['nome_sottocategoria']]);
     flash_set("Sezione creata con successo!");
@@ -96,6 +217,7 @@ if (isset($_POST['add_evento'])) {
 if (isset($_POST['edit_evento'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $ev_id = (int)$_POST['evento_id'];
+    if (!ev_autorizzato($conn, $ev_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
     $sub_id = !empty($_POST['sottocategoria_id']) ? (int)$_POST['sottocategoria_id'] : null;
     $titolo = $_POST['titolo'] ?? '';
     $luogo = $_POST['luogo'] ?? '';
@@ -141,6 +263,7 @@ if (isset($_POST['edit_evento'])) {
 if (isset($_POST['add_turno'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $ev_id = (int)$_POST['evento_id'];
+    if (!ev_autorizzato($conn, $ev_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
     $nt = leggi_turno_post();
     if (!$nt) {
         flash_set("Inserisci almeno il nome del turno oppure la data.", "danger");
@@ -155,6 +278,7 @@ if (isset($_POST['add_turno'])) {
 if (isset($_POST['edit_turno'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $t_id = (int)$_POST['turno_id'];
+    if (!turno_autorizzato($conn, $t_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
     $et = leggi_turno_post();
     if (!$et) {
         flash_set("Inserisci almeno il nome del turno oppure la data.", "danger");
@@ -173,7 +297,7 @@ if (isset($_POST['edit_turno'])) {
     $promossi = 0;
     
     if ($posti_liberi > 0) {
-        $res_attesa = $conn->query("SELECT p.*, e.titolo as evento_titolo, e.luogo FROM prenotazioni p JOIN turni t ON p.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE p.turno_id = $t_id AND p.stato = 'in_attesa' ORDER BY p.id ASC");
+        $res_attesa = $conn->query("SELECT p.*, e.titolo as evento_titolo, e.luogo FROM prenotazioni p JOIN turni t ON p.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE p.turno_id = $t_id AND p.stato = 'in_attesa' ORDER BY p.data_prenotazione ASC, p.id ASC");
         if ($res_attesa && $res_attesa->num_rows > 0) {
             if (file_exists(dirname(__DIR__) . '/functions.php')) require_once dirname(__DIR__) . '/functions.php';
             while ($pren = $res_attesa->fetch_assoc()) {
@@ -187,7 +311,7 @@ if (isset($_POST['edit_turno'])) {
                         $link = $proto . ($_SERVER['HTTP_HOST'] ?? 'localhost') . rtrim(dirname(dirname($_SERVER['PHP_SELF'])), '/\\') . "/stampa_ricevuta.php?code=" . urlencode($pren['codice_prenotazione']);
                         $btn = "<p><a href='$link' style='background:#B80000; color:#fff; padding:10px; border-radius:6px; text-decoration:none;'>Scarica Ricevuta</a></p>";
                         $body = "<p>Gentile " . htmlspecialchars($pren['nome']) . ", la tua prenotazione in lista d'attesa è stata CONFERMATA per l'evento " . htmlspecialchars($pren['evento_titolo']) . ".</p>" . $btn;
-                        inviaNotificaEmail($pren['email'], "Posto Confermato: " . $pren['evento_titolo'], $body, $conn);
+                        inviaNotificaEmail($pren['email'], "Posto Confermato: " . $pren['evento_titolo'], $body, $conn, colore_area_turno($conn, $t_id));
                     }
                 } else break;
             }
@@ -209,6 +333,7 @@ if (isset($_POST['archivia_conclusi'])) {
 if (isset($_POST['archivia_ev'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $arch_ev_id = (int)$_POST['archivia_ev'];
+    if (!ev_autorizzato($conn, $arch_ev_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
     $conn->query("UPDATE eventi SET archiviato = 1, blocca_auto_archivio = 0 WHERE id = $arch_ev_id");
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Archiviazione Evento", ["Evento ID" => $arch_ev_id]);
     flash_set("Evento archiviato!");
@@ -217,6 +342,7 @@ if (isset($_POST['archivia_ev'])) {
 if (isset($_POST['del_ev'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $ev_id = (int)$_POST['del_ev'];
+    if (!ev_autorizzato($conn, $ev_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
     $res_ev_info = $conn->query("SELECT titolo FROM eventi WHERE id = $ev_id");
     $ev_titolo_log = ($res_ev_info && $r_log = $res_ev_info->fetch_assoc()) ? $r_log['titolo'] : '';
     $res_t_del = $conn->query("SELECT id FROM turni WHERE evento_id = $ev_id");
@@ -232,6 +358,7 @@ if (isset($_POST['del_ev'])) {
 if (isset($_POST['del_turno'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $t_id = (int)$_POST['del_turno'];
+    if (!turno_autorizzato($conn, $t_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
     $conn->query("DELETE FROM prenotazioni WHERE turno_id = $t_id");
     $conn->query("DELETE FROM turni WHERE id = $t_id");
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Eliminazione Turno", ["Turno ID" => $t_id]);
@@ -313,6 +440,10 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
                     <input type="text" name="nome_sottocategoria" class="form-control form-control-sm" placeholder="Nome sezione..." required>
                     <input type="number" name="ordine_sottocategoria" class="form-control form-control-sm" value="0" style="width:60px;" required>
                 </div>
+                <div class="form-check mb-2" style="font-size:.78rem;">
+                    <input class="form-check-input" type="checkbox" name="affiancata_in_alto" value="1" id="nuovaSezAlto">
+                    <label class="form-check-label" for="nuovaSezAlto">Affiancata in alto (layout Griglia)</label>
+                </div>
                 <button type="submit" name="add_sottocategoria" class="btn btn-sm w-100 fw-bold text-white" style="background:<?php echo $col_area; ?>;border-radius:7px;">Aggiungi</button>
             </form>
             <div class="d-flex flex-column gap-1">
@@ -320,6 +451,13 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
                     <div class="d-flex align-items-center gap-2 p-2 rounded" style="background:#f8fafc;border:1px solid #e2e8f0;font-size:.82rem;">
                         <span class="badge text-white fw-bold" style="background:<?php echo $col_area; ?>;min-width:24px;"><?php echo $sub['ordine']; ?></span>
                         <span class="fw-semibold text-dark"><?php echo htmlspecialchars($sub['nome'] ?? ''); ?></span>
+                        <form method="POST" class="ms-auto m-0">
+                            <?php csrf_field(); ?>
+                            <input type="hidden" name="toggle_sezione_alto" value="<?php echo (int)$sub['id']; ?>">
+                            <input type="hidden" name="val" value="<?php echo !empty($sub['affiancata_in_alto']) ? 0 : 1; ?>">
+                            <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
+                            <button type="submit" class="btn btn-sm py-0 px-2 <?php echo !empty($sub['affiancata_in_alto']) ? 'btn-dark' : 'btn-outline-secondary'; ?>" style="font-size:.68rem;border-radius:6px;" title="Nel layout Griglia: mostra questa sezione in alto, affiancata alle altre sezioni con la stessa opzione" aria-pressed="<?php echo !empty($sub['affiancata_in_alto']) ? 'true' : 'false'; ?>"><i class="fa fa-table-columns me-1" aria-hidden="true"></i>In alto</button>
+                        </form>
                     </div>
                 <?php endforeach; ?>
                 <?php if(empty($sottocategorie)): ?>
@@ -361,6 +499,12 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
                         <!-- Bottoni azione -->
                         <div class="d-flex gap-1 flex-shrink-0">
                             <button type="button" class="btn btn-sm btn-outline-primary" style="border-radius:8px;width:34px;height:34px;padding:0;" data-bs-toggle="modal" data-bs-target="#modEv<?php echo $ev['id']; ?>" title="Modifica evento"><i class="fa fa-edit" style="font-size:.85rem;"></i></button>
+                            <form method="POST" class="d-inline m-0">
+                                <?php csrf_field(); ?>
+                                <input type="hidden" name="duplica_evento" value="<?php echo $ev['id']; ?>">
+                                <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary" style="border-radius:8px;width:34px;height:34px;padding:0;" data-confirm="Duplicare questo evento con turni, campi del form e sondaggio? Gli iscritti e le risposte non vengono copiati." title="Duplica evento" aria-label="Duplica evento"><i class="fa fa-copy" aria-hidden="true"></i></button>
+                            </form>
                             <?php if ($can_manage_settings): ?>
                                 <form method="POST" class="d-inline m-0">
                                     <?php csrf_field(); ?>
@@ -429,6 +573,7 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
                             <div class="d-flex align-items-center gap-1 flex-shrink-0">
                                 <a href="stampa_qr_aula.php?t_id=<?php echo $t['id']; ?>&p_id=<?php echo $filtro_p; ?>" class="btn btn-sm btn-outline-success py-0 px-2 fw-bold" style="border-radius:6px;font-size:.75rem;" title="QR Aula"><i class="fa fa-qrcode me-1"></i>QR Aula</a>
                                 <button type="button" class="btn btn-sm btn-outline-primary py-0 px-2" style="border-radius:6px;" data-bs-toggle="modal" data-bs-target="#modTurno<?php echo $t['id']; ?>" title="Modifica turno"><i class="fa fa-edit"></i></button>
+<form method="POST" class="d-inline m-0">                                    <?php csrf_field(); ?>                                    <input type="hidden" name="duplica_turno" value="<?php echo $t['id']; ?>">                                    <input type="hidden" name="f_ev" value="<?php echo $filtro_ev; ?>">                                    <button type="submit" class="btn btn-sm btn-outline-secondary py-0 px-2" style="border-radius:6px;" title="Duplica turno" aria-label="Duplica turno"><i class="fa fa-copy" aria-hidden="true"></i></button>                                </form>
                                 <form method="POST" class="d-inline m-0">
                                     <?php csrf_field(); ?>
                                     <input type="hidden" name="del_turno" value="<?php echo $t['id']; ?>">
@@ -682,4 +827,13 @@ $col_area = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
     <?php endforeach; ?>
 <?php endforeach; ?>
 
+<script>
+// Dopo una duplicazione apre subito la finestra di modifica della copia (?apri=modTurnoN / modEvN)
+document.addEventListener("DOMContentLoaded", function () {
+    var id = new URLSearchParams(location.search).get("apri");
+    if (!id || !/^mod(Turno|Ev)[0-9]+$/.test(id)) return;
+    var el = document.getElementById(id);
+    if (el && window.bootstrap) bootstrap.Modal.getOrCreateInstance(el).show();
+});
+</script>
 <?php require_once 'admin_footer.php'; ?>

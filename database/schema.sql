@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS `sottocategorie` (
     `pagina_id` int(11)      NOT NULL,
     `nome`      varchar(255) NOT NULL,
     `ordine`    int(11)      DEFAULT 0,
+    `affiancata_in_alto` tinyint(1) NOT NULL DEFAULT 0 COMMENT 'layout Griglia: sezione in alto, affiancata',
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -162,8 +163,11 @@ CREATE TABLE IF NOT EXISTS `eventi` (
     `locandina_path`        varchar(255) DEFAULT '',
     `is_evidenza`           tinyint(1)   DEFAULT 0,
     `richiede_prenotazione` tinyint(1)   DEFAULT 1,
+    `abilita_presenze`      tinyint(1)   NOT NULL DEFAULT 1,
+    `blocca_auto_archivio`  tinyint(1)   NOT NULL DEFAULT 0,
     `ruolo_accesso_id`      int(11)      DEFAULT 0,
     `gestori_utenti_ids`    varchar(255) DEFAULT '',
+    `permessi_gestori_json` text         DEFAULT NULL,
     `ordine`                int(11)      DEFAULT 0,
     `archiviato`            tinyint(1)   DEFAULT 0,
     PRIMARY KEY (`id`)
@@ -182,6 +186,7 @@ CREATE TABLE IF NOT EXISTS `turni` (
     `max_posti`             int(11)  DEFAULT 30,
     `data_apertura`         datetime DEFAULT NULL,
     `data_chiusura`         datetime DEFAULT NULL,
+    `token_checkin`         varchar(64) DEFAULT NULL,
     `abilita_lista_attesa`  tinyint(1) DEFAULT 0,
     `abilita_multi_posto`   tinyint(1) DEFAULT 0,
     `richiede_approvazione` tinyint(1) DEFAULT 0,
@@ -205,6 +210,13 @@ CREATE TABLE IF NOT EXISTS `prenotazioni` (
     `matricola`           varchar(50)  DEFAULT NULL,
     `dati_custom_json`    text         DEFAULT NULL,
     `data_prenotazione`   datetime     DEFAULT current_timestamp(),
+    `data_presenza`             datetime    DEFAULT NULL,
+    `scadenza_conferma`         datetime    DEFAULT NULL COMMENT 'posto offerto dalla lista d''attesa: termine per confermare',
+    `reminder_inviato`          tinyint(1)  NOT NULL DEFAULT 0,
+    `attestato_inviato`         tinyint(1)  NOT NULL DEFAULT 0,
+    `email_post_evento_inviata` tinyint(1)  NOT NULL DEFAULT 0,
+    `token_sondaggio`           varchar(64) DEFAULT NULL,
+    `sondaggio_completato`      tinyint(1)  NOT NULL DEFAULT 0,
     PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -311,6 +323,55 @@ CREATE TABLE IF NOT EXISTS `rate_limit_attempts` (
     `hit_at`   datetime         DEFAULT current_timestamp(),
     PRIMARY KEY (`id`),
     KEY `idx_ip_endpoint` (`ip_hash`, `endpoint`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ------------------------------------------------------------
+-- Tabella: slide_home  (carosello della home)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `slide_home` (
+    `id`            int(11)      NOT NULL AUTO_INCREMENT,
+    `immagine_path` varchar(255) NOT NULL,
+    `titolo`        varchar(255) DEFAULT '',
+    `sottotitolo`   varchar(255) DEFAULT '',
+    `link`          varchar(500) DEFAULT '',
+    `ordine`        int(11)      DEFAULT 0,
+    `attiva`        tinyint(1)   DEFAULT 1,
+    `created_at`    datetime     DEFAULT current_timestamp(),
+    PRIMARY KEY (`id`),
+    KEY `idx_ordine` (`ordine`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ------------------------------------------------------------
+-- Tabella: log_accessi  (accessi SSO)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `log_accessi` (
+    `id`         int(11)      NOT NULL AUTO_INCREMENT,
+    `utente_id`  int(11)      DEFAULT NULL,
+    `email`      varchar(255) DEFAULT NULL,
+    `nome`       varchar(100) DEFAULT NULL,
+    `cognome`    varchar(100) DEFAULT NULL,
+    `ip`         varchar(45)  DEFAULT NULL,
+    `user_agent` varchar(512) DEFAULT NULL,
+    `tipo`       varchar(20)  DEFAULT 'sso',
+    `created_at` datetime     DEFAULT current_timestamp(),
+    PRIMARY KEY (`id`),
+    KEY `idx_uid` (`utente_id`),
+    KEY `idx_cat` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ------------------------------------------------------------
+-- Tabella: log_email  (registro invii: accettate / rifiutate dal server SMTP)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `log_email` (
+    `id`           int(11)      NOT NULL AUTO_INCREMENT,
+    `destinatario` varchar(255) DEFAULT NULL,
+    `oggetto`      varchar(255) DEFAULT NULL,
+    `esito`        tinyint(1)   DEFAULT 0,
+    `canale`       varchar(10)  DEFAULT 'smtp',
+    `errore`       varchar(500) DEFAULT NULL,
+    `created_at`   datetime     DEFAULT current_timestamp(),
+    PRIMARY KEY (`id`),
+    KEY `idx_cat` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 1;

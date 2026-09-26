@@ -49,16 +49,6 @@ if (!function_exists('check_rate_limit')) {
     function check_rate_limit($conn, $endpoint, $max = 10, $window_sec = 300) {
         $ip_hash = hash('sha256', ($_SERVER['REMOTE_ADDR'] ?? 'unknown') . $endpoint);
 
-        // Crea tabella se non esiste
-        $conn->query("CREATE TABLE IF NOT EXISTS rate_limit_attempts (
-            id        INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            ip_hash   CHAR(64)     NOT NULL,
-            endpoint  VARCHAR(80)  NOT NULL,
-            hit_at    DATETIME     NOT NULL,
-            INDEX idx_ip_ep (ip_hash, endpoint),
-            INDEX idx_hit  (hit_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-
         // Pulisce record vecchi (>1 ora) per tenere la tabella piccola
         $conn->query("DELETE FROM rate_limit_attempts WHERE hit_at < DATE_SUB(NOW(), INTERVAL 1 HOUR)");
 
@@ -222,19 +212,6 @@ if (!function_exists('tipo_utente_saml')) {
 // 1b. LOG ACCESSI SSO
 if (!function_exists('registra_accesso_sso')) {
     function registra_accesso_sso($conn, $utente_id, $email, $nome, $cognome, $tipo = 'sso') {
-        @$conn->query("CREATE TABLE IF NOT EXISTS log_accessi (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            utente_id INT DEFAULT NULL,
-            email VARCHAR(255),
-            nome VARCHAR(100),
-            cognome VARCHAR(100),
-            ip VARCHAR(45),
-            user_agent VARCHAR(512),
-            tipo VARCHAR(20) DEFAULT 'sso',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_uid (utente_id),
-            INDEX idx_cat (created_at)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         $ip = substr($_SERVER['REMOTE_ADDR'] ?? '', 0, 45);
         $ua = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 512);
         $stmt = $conn->prepare("INSERT INTO log_accessi (utente_id, email, nome, cognome, ip, user_agent, tipo) VALUES (?,?,?,?,?,?,?)");
@@ -253,20 +230,6 @@ $GLOBALS['ultimo_errore_email'] = '';
 if (!function_exists('registra_log_email')) {
     // Traccia ogni invio in log_email: serve a capire quali mail partono e quali vengono rifiutate dal server SMTP.
     function registra_log_email($conn, string $to, string $subject, bool $ok, string $errore = '', string $canale = 'smtp') {
-        static $tabella_ok = false;
-        if (!$tabella_ok) {
-            @$conn->query("CREATE TABLE IF NOT EXISTS log_email (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                destinatario VARCHAR(255),
-                oggetto VARCHAR(255),
-                esito TINYINT(1) DEFAULT 0,
-                canale VARCHAR(10) DEFAULT 'smtp',
-                errore VARCHAR(500) DEFAULT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_cat (created_at)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-            $tabella_ok = true;
-        }
         $stmt = @$conn->prepare("INSERT INTO log_email (destinatario, oggetto, esito, canale, errore) VALUES (?,?,?,?,?)");
         if ($stmt) {
             $to = mb_substr($to, 0, 255); $subject = mb_substr($subject, 0, 255); $errore = mb_substr($errore, 0, 500);
@@ -304,7 +267,8 @@ if (!function_exists('smtp_comando')) {
 }
 
 if (!function_exists('inviaNotificaEmail')) {
-    function inviaNotificaEmail($to, $subject, $body_html, $conn) {
+    // $colore: colore dell'area (es. colore_area_turno()); null = rosso istituzionale
+    function inviaNotificaEmail($to, $subject, $body_html, $conn, $colore = null) {
         $GLOBALS['ultimo_errore_email'] = '';
         $to = trim((string)$to);
         if ($to === '' || !filter_var($to, FILTER_VALIDATE_EMAIL)) {
@@ -327,6 +291,8 @@ if (!function_exists('inviaNotificaEmail')) {
         $from_e = !empty($sys['smtp_from_email']) ? trim($sys['smtp_from_email']) : 'noreply.eventi@unical.it';
         $from_n = !empty($sys['smtp_from_name']) ? $sys['smtp_from_name'] : 'Eventi DiBEST';
         $secure = strtolower($sys['smtp_secure'] ?? 'tls');
+
+        $body_html = impagina_email((string)$body_html, $from_n, $colore);
 
         $dominio_from = substr(strrchr($from_e, '@') ?: '@unical.it', 1);
         $headers  = "Date: " . date('r') . "\r\n";
@@ -477,10 +443,74 @@ if (!function_exists('url_base_sito')) {
     }
 }
 
+// =======================================================================
+// COLORE DELL'AREA (card, badge, email)
+// =======================================================================
+if (!function_exists('colore_valido')) {
+    // Colore #RRGGBB sicuro da stampare negli attributi style; altrimenti il default.
+    function colore_valido($hex, string $default = '#B30000'): string {
+        $hex = trim((string)$hex);
+        if (preg_match('/^#[0-9a-f]{6}$/i', $hex)) return strtoupper($hex);
+        if (preg_match('/^#[0-9a-f]{3}$/i', $hex)) return strtoupper('#' . $hex[1] . $hex[1] . $hex[2] . $hex[2] . $hex[3] . $hex[3]);
+        return $default;
+    }
+}
+
+if (!function_exists('colore_testo_su')) {
+    // Colore del testo leggibile su uno sfondo (regola di contrasto WCAG):
+    // bianco o grigio quasi nero, quello con il contrasto più alto.
+    function colore_testo_su($hex_sfondo): string {
+        $h = ltrim(colore_valido($hex_sfondo), '#');
+        $lin = function (int $c): float { $c /= 255; return $c <= 0.03928 ? $c / 12.92 : (($c + 0.055) / 1.055) ** 2.4; };
+        $L = 0.2126 * $lin(hexdec(substr($h, 0, 2))) + 0.7152 * $lin(hexdec(substr($h, 2, 2))) + 0.0722 * $lin(hexdec(substr($h, 4, 2)));
+        $contrasto_bianco = 1.05 / ($L + 0.05);
+        $contrasto_scuro  = ($L + 0.05) / (0.0216 + 0.05); // 0.0216 = luminanza di #1F2937
+        return $contrasto_bianco >= $contrasto_scuro ? '#FFFFFF' : '#1F2937';
+    }
+}
+
+if (!function_exists('colore_area_turno')) {
+    // Colore primario dell'area a cui appartiene un turno (memorizzato per la richiesta).
+    function colore_area_turno($conn, $turno_id): string {
+        static $cache = [];
+        $turno_id = (int)$turno_id;
+        if (!isset($cache[$turno_id])) {
+            $res = $conn->query("SELECT pe.colore_primario FROM turni t JOIN eventi e ON t.evento_id = e.id
+                                 JOIN pagine_eventi pe ON e.pagina_id = pe.id WHERE t.id = $turno_id LIMIT 1");
+            $row = $res ? $res->fetch_assoc() : null;
+            $cache[$turno_id] = colore_valido($row['colore_primario'] ?? '');
+        }
+        return $cache[$turno_id];
+    }
+}
+
+if (!function_exists('impagina_email')) {
+    // Impaginazione comune delle email: intestazione con il colore dell'area, corpo, piè di pagina.
+    // I pulsanti col rosso istituzionale nel corpo prendono il colore dell'area.
+    // Se il corpo è già un documento HTML completo (template personalizzato) resta com'è.
+    function impagina_email(string $corpo, string $titolo, ?string $colore = null): string {
+        if (stripos($corpo, '<html') !== false || stripos($corpo, '<body') !== false) return $corpo;
+        $col   = colore_valido($colore ?? '');
+        $testo = colore_testo_su($col);
+        if ($colore !== null) {
+            // Pulsanti "sfondo rosso + testo bianco": sfondo dell'area e testo a contrasto
+            $corpo = preg_replace('/background(-color)?\s*:\s*#B[38]0000\s*;\s*color\s*:\s*(#fff(fff)?|white)/i',
+                                  'background$1:' . $col . '; color:' . $testo, $corpo);
+            $corpo = str_ireplace(['#B30000', '#B80000'], $col, $corpo);
+        }
+        return '<div style="background:#f3f4f6;padding:24px 12px;font-family:Arial,Helvetica,sans-serif;">'
+             . '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">'
+             . '<tr><td style="background:' . $col . ';color:' . $testo . ';padding:16px 24px;font-size:18px;font-weight:bold;">' . htmlspecialchars($titolo) . '</td></tr>'
+             . '<tr><td style="padding:24px;color:#1f2937;font-size:15px;line-height:1.6;">' . $corpo . '</td></tr>'
+             . '<tr><td style="padding:12px 24px;background:#f9fafb;color:#6b7280;font-size:12px;">Messaggio automatico: non rispondere a questa email. Gestisci le tue prenotazioni dall\'Area Personale del portale.</td></tr>'
+             . '</table></div>';
+    }
+}
+
 if (!function_exists('invia_email_attestato_se_concluso')) {
     function invia_email_attestato_se_concluso($conn, $pr_id) {
         $stmt = $conn->prepare(
-            "SELECT p.id, p.nome, p.cognome, p.email, p.codice_prenotazione,
+            "SELECT p.id, p.turno_id, p.nome, p.cognome, p.email, p.codice_prenotazione,
                     p.attestato_inviato, p.presente,
                     t.data_turno, t.orario_fine, e.titolo
              FROM prenotazioni p
@@ -514,7 +544,7 @@ if (!function_exists('invia_email_attestato_se_concluso')) {
                . "<p>In alternativa puoi recuperarlo dalla tua <a href='" . $link_area . "'>Area Personale</a>.</p>"
                . "<p>Cordiali saluti,<br>Il team Eventi DiBEST</p>";
 
-        inviaNotificaEmail($row['email'], $oggetto, $corpo, $conn);
+        inviaNotificaEmail($row['email'], $oggetto, $corpo, $conn, colore_area_turno($conn, $row['turno_id']));
         $id_safe = (int)$pr_id;
         $conn->query("UPDATE prenotazioni SET attestato_inviato = 1 WHERE id = $id_safe");
         return true;
@@ -569,13 +599,7 @@ if (!function_exists('getGoogleCalendarUrl')) {
     }
 }
 
-if (!function_exists('getPostiOccupati')) {
-    function getPostiOccupati($conn, $turno_id) {
-        // Aggiornato per conteggiare anche i posti in 'richiesta_conferma' come temporaneamente occupati
-        $res = $conn->query("SELECT COALESCE(SUM(num_posti), 0) as tot FROM prenotazioni WHERE turno_id = " . (int)$turno_id . " AND stato IN ('confermata', 'richiesta_conferma')");
-        return ($res && $row = $res->fetch_assoc()) ? (int)$row['tot'] : 0;
-    }
-}
+// getPostiOccupati() è definita in config.php (unica versione, con regola degli stati e FOR UPDATE)
 
 // =======================================================================
 // MOTORE INTELLIGENTE LISTE D'ATTESA (NUOVO MODULO)
@@ -594,13 +618,12 @@ if (!function_exists('promuovi_lista_attesa')) {
         }
 
         // Quanti posti liberi ci sono?
-        $occ_res = $conn->query("SELECT COALESCE(SUM(num_posti), 0) as tot FROM prenotazioni WHERE turno_id = $turno_id AND stato IN ('confermata', 'richiesta_conferma')");
-        $occupati = $occ_res->fetch_assoc()['tot'];
-        $posti_liberi = $turno['max_posti'] - $occupati;
+        $turno_id = (int)$turno_id;
+        $posti_liberi = (int)$turno['max_posti'] - getPostiOccupati($conn, $turno_id);
         
         // Ciclo sicuro per promuovere utenti finché c'è spazio
         while ($posti_liberi > 0) {
-            $res_promo = $conn->query("SELECT p.*, e.titolo as evento_titolo FROM prenotazioni p JOIN turni t ON p.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE p.turno_id = $turno_id AND p.stato = 'in_attesa' ORDER BY p.data_prenotazione ASC LIMIT 1");
+            $res_promo = $conn->query("SELECT p.*, e.titolo as evento_titolo FROM prenotazioni p JOIN turni t ON p.turno_id = t.id JOIN eventi e ON t.evento_id = e.id WHERE p.turno_id = $turno_id AND p.stato = 'in_attesa' ORDER BY p.data_prenotazione ASC, p.id ASC LIMIT 1");
             
             if ($res_promo && $u_promo = $res_promo->fetch_assoc()) {
                 if ($posti_liberi >= $u_promo['num_posti']) {
@@ -622,7 +645,7 @@ if (!function_exists('promuovi_lista_attesa')) {
                                      </div>
                                      <p><a href='$link_conferma' style='background-color:#198754; color:white; padding:12px 25px; text-decoration:none; border-radius:6px; font-weight:bold; display:inline-block;'>CONFERMA IL MIO POSTO</a></p>";
                         
-                        inviaNotificaEmail($u_promo['email'], $obj_tpl, $body_tpl, $conn);
+                        inviaNotificaEmail($u_promo['email'], $obj_tpl, $body_tpl, $conn, colore_area_turno($conn, $turno_id));
                         
                         $posti_liberi -= $u_promo['num_posti']; // Sottrae i posti e continua il ciclo
                     } else {
@@ -948,7 +971,7 @@ if (!function_exists('get_prenotazione_ricevuta')) {
     function get_prenotazione_ricevuta($conn, string $code, int $id): ?array {
         $select = "SELECT pr.*, t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine,
                e.titolo as evento_titolo, e.luogo as evento_luogo,
-               pe.titolo as pagina_titolo,
+               pe.titolo as pagina_titolo, pe.colore_primario,
                cp.logo_path, cp.nome_portale, cp.sottotitolo_portale,
                COALESCE(NULLIF(pr.matricola,''), u.matricola_studente, u.matricola_dipendente, u.matricola, '') as matricola_effettiva
             FROM prenotazioni pr
@@ -1063,7 +1086,7 @@ if (!function_exists('decadi_attese_vincolate')) {
     // l'utente con una email e ripassa i posti liberati alla lista d'attesa. Ritorna quante ne annulla.
     function decadi_attese_vincolate($conn, int $pr_id): int {
         $res = $conn->query(
-            "SELECT pr.stato, pr.email, pr.utente_id, pr.matricola, pr.nome, t.evento_id, e.pagina_id,
+            "SELECT pr.stato, pr.turno_id, pr.email, pr.utente_id, pr.matricola, pr.nome, t.evento_id, e.pagina_id,
                     e.titolo AS evento_titolo, pe.limite_iscrizioni
              FROM prenotazioni pr
              JOIN turni t ON pr.turno_id = t.id
@@ -1121,7 +1144,7 @@ if (!function_exists('decadi_attese_vincolate')) {
                    . "<p>la tua prenotazione per <strong>" . htmlspecialchars($c['evento_titolo']) . "</strong> è <strong>confermata</strong>.</p>"
                    . "<p>Poiché in quest'area è consentita una sola iscrizione, le tue altre richieste in lista d'attesa sono state annullate automaticamente:</p>"
                    . "<ul>$voci</ul>";
-            inviaNotificaEmail($email, "Liste d'attesa annullate: iscrizione confermata a " . $c['evento_titolo'], $corpo, $conn);
+            inviaNotificaEmail($email, "Liste d'attesa annullate: iscrizione confermata a " . $c['evento_titolo'], $corpo, $conn, colore_area_turno($conn, $c['turno_id']));
         }
         return count($annullate);
     }
@@ -1547,11 +1570,152 @@ if (!function_exists('invalidate_configurazione_portale_cache')) {
 // =======================================================================
 // WIDGET HOME: configurazione (JSON in configurazione_portale.widgets_home)
 // =======================================================================
+if (!function_exists('get_prenotazioni_attive_utente')) {
+    // Prenotazioni ancora da vivere dell'utente (turno non concluso), la più urgente per prima:
+    // prima i posti offerti da confermare, poi per data; i turni senza data in coda.
+    function get_prenotazioni_attive_utente($conn, int $u_id, int $limite = 10): array {
+        if ($u_id <= 0) return [];
+        $stmt = $conn->prepare(
+            "SELECT pr.id, pr.codice_prenotazione, IFNULL(pr.stato, 'confermata') AS stato, pr.num_posti, pr.scadenza_conferma,
+                    t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine,
+                    e.titolo AS evento_titolo, e.luogo, e.locandina_path,
+                    pe.titolo AS area_titolo, pe.colore_primario, pe.slug
+             FROM prenotazioni pr
+             JOIN turni t  ON pr.turno_id = t.id
+             JOIN eventi e ON t.evento_id = e.id
+             JOIN pagine_eventi pe ON e.pagina_id = pe.id
+             WHERE (pr.utente_id = ? OR LOWER(pr.email) = (SELECT LOWER(u.email) FROM utenti u WHERE u.id = ? AND u.email != ''))
+               AND IFNULL(pr.stato, 'confermata') IN ('confermata', 'richiesta_conferma', 'da_approvare', 'in_attesa')
+               AND e.archiviato = 0
+               AND (t.data_turno IS NULL OR CONCAT(t.data_turno, ' ', COALESCE(t.orario_fine, '23:59:59')) >= NOW())
+             ORDER BY (IFNULL(pr.stato, 'confermata') = 'richiesta_conferma') DESC,
+                      (t.data_turno IS NULL), t.data_turno ASC, t.orario_inizio ASC, pr.id ASC
+             LIMIT ?"
+        );
+        // Mai bloccare la home per un widget: in caso di errore SQL, niente widget + log
+        if (!$stmt) { error_log('[get_prenotazioni_attive_utente] ' . $conn->error); return []; }
+        $stmt->bind_param("iii", $u_id, $u_id, $limite);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $rows = [];
+        while ($r = $res->fetch_assoc()) $rows[] = $r;
+        return $rows;
+    }
+}
+
+if (!function_exists('get_posizioni_lista_attesa')) {
+    // Posizione in coda (1 = il prossimo a essere promosso) delle prenotazioni 'in_attesa' indicate.
+    // Stesso ordine di promuovi_lista_attesa: data di prenotazione, a parità l'id.
+    // Ritorna [pr_id => ['posizione' => n, 'totale' => persone in coda nel turno]].
+    function get_posizioni_lista_attesa($conn, array $pr_ids): array {
+        $pr_ids = array_filter(array_map('intval', $pr_ids));
+        if (!$pr_ids) return [];
+        $in = implode(',', $pr_ids);
+        $res = $conn->query(
+            "SELECT p.id,
+                    1 + (SELECT COUNT(*) FROM prenotazioni q
+                          WHERE q.turno_id = p.turno_id AND q.stato = 'in_attesa'
+                            AND (q.data_prenotazione < p.data_prenotazione
+                                 OR (q.data_prenotazione = p.data_prenotazione AND q.id < p.id))) AS posizione,
+                    (SELECT COUNT(*) FROM prenotazioni r WHERE r.turno_id = p.turno_id AND r.stato = 'in_attesa') AS totale
+             FROM prenotazioni p
+             WHERE p.id IN ($in) AND p.stato = 'in_attesa'"
+        );
+        $out = [];
+        if ($res) while ($r = $res->fetch_assoc()) $out[(int)$r['id']] = ['posizione' => (int)$r['posizione'], 'totale' => (int)$r['totale']];
+        return $out;
+    }
+}
+
+if (!function_exists('get_turni_ultimi_posti')) {
+    // Turni prenotabili adesso con pochi posti (<= 10% della capienza, almeno 1)
+    // o con iscrizioni che chiudono entro 48 ore. Un solo turno per evento, i più urgenti prima.
+    function get_turni_ultimi_posti($conn, array $pagine_ids, int $limite = 4): array {
+        $pagine_ids = array_filter(array_map('intval', $pagine_ids));
+        if (!$pagine_ids) return [];
+        $in = implode(',', $pagine_ids);
+        // Conteggio posti in una sottoquery: MariaDB non accetta alias di aggregati
+        // dentro espressioni di HAVING/ORDER BY, e così vale anche ONLY_FULL_GROUP_BY.
+        $res = $conn->query(
+            "SELECT x.* FROM (
+                SELECT t.id AS turno_id, t.nome_turno, t.data_turno, t.orario_inizio, t.orario_fine, t.max_posti, t.data_chiusura,
+                       e.id AS evento_id, e.titolo, e.locandina_path,
+                       pe.titolo AS area_titolo, pe.colore_primario, pe.slug,
+                       (SELECT COALESCE(SUM(pr.num_posti), 0) FROM prenotazioni pr
+                         WHERE pr.turno_id = t.id
+                           AND IFNULL(pr.stato, 'confermata') IN ('confermata', 'richiesta_conferma', 'da_approvare')) AS occupati
+                FROM turni t
+                JOIN eventi e ON t.evento_id = e.id
+                JOIN pagine_eventi pe ON e.pagina_id = pe.id
+                WHERE e.archiviato = 0 AND pe.visibile = 1 AND e.pagina_id IN ($in)
+                  AND IFNULL(e.richiede_prenotazione, 1) = 1
+                  AND t.max_posti > 0 AND t.max_posti < 9000
+                  AND (t.data_apertura IS NULL OR t.data_apertura <= NOW())
+                  AND (t.data_chiusura IS NULL OR t.data_chiusura >= NOW())
+                  AND (t.data_turno IS NULL OR CONCAT(t.data_turno, ' ', COALESCE(t.orario_inizio, '23:59:59')) > NOW())
+             ) x
+             WHERE x.max_posti - x.occupati > 0
+               AND (x.max_posti - x.occupati <= GREATEST(1, CEIL(x.max_posti * 0.10))
+                    OR (x.data_chiusura IS NOT NULL AND x.data_chiusura <= NOW() + INTERVAL 48 HOUR))
+             ORDER BY (x.max_posti - x.occupati) / x.max_posti ASC, x.data_chiusura IS NULL, x.data_chiusura ASC
+             LIMIT 30"
+        );
+        $out = [];
+        if ($res) {
+            while ($r = $res->fetch_assoc()) {
+                if (isset($out[(int)$r['evento_id']])) continue;
+                $r['liberi'] = (int)$r['max_posti'] - (int)$r['occupati'];
+                $out[(int)$r['evento_id']] = $r;
+                if (count($out) >= $limite) break;
+            }
+        }
+        return array_values($out);
+    }
+}
+
+if (!function_exists('get_riepilogo_posti')) {
+    // Capienza e posti occupati dei turni ancora prenotabili, raggruppati per evento o per area.
+    // $per = 'evento' | 'pagina'. Ritorna [id => ['capienza'=>, 'occupati'=>, 'liberi'=>]].
+    // Esclusi: eventi senza prenotazione, turni illimitati (>= 9000), conclusi o con iscrizioni chiuse.
+    function get_riepilogo_posti($conn, string $per, array $ids): array {
+        $ids = array_filter(array_map('intval', $ids));
+        if (!$ids) return [];
+        $col = $per === 'pagina' ? 'e.pagina_id' : 'e.id';
+        $in  = implode(',', $ids);
+        $res = $conn->query(
+            "SELECT x.chiave, SUM(x.max_posti) AS capienza, SUM(x.occupati) AS occupati FROM (
+                SELECT $col AS chiave, t.max_posti,
+                       (SELECT COALESCE(SUM(pr.num_posti), 0) FROM prenotazioni pr
+                         WHERE pr.turno_id = t.id
+                           AND IFNULL(pr.stato, 'confermata') IN ('confermata', 'richiesta_conferma', 'da_approvare')) AS occupati
+                FROM turni t
+                JOIN eventi e ON t.evento_id = e.id
+                WHERE $col IN ($in) AND e.archiviato = 0
+                  AND IFNULL(e.richiede_prenotazione, 1) = 1
+                  AND t.max_posti > 0 AND t.max_posti < 9000
+                  AND (t.data_chiusura IS NULL OR t.data_chiusura >= NOW())
+                  AND (t.data_turno IS NULL OR CONCAT(t.data_turno, ' ', COALESCE(t.orario_inizio, '23:59:59')) > NOW())
+             ) x
+             GROUP BY x.chiave"
+        );
+        $out = [];
+        if ($res) {
+            while ($r = $res->fetch_assoc()) {
+                $cap = (int)$r['capienza'];
+                $occ = min($cap, (int)$r['occupati']);
+                $out[(int)$r['chiave']] = ['capienza' => $cap, 'occupati' => $occ, 'liberi' => $cap - $occ];
+            }
+        }
+        return $out;
+    }
+}
+
 if (!function_exists('widgets_home_default')) {
     function widgets_home_default(): array {
         return [
-            'slideshow' => 1, 'annunci' => 0, 'card_aree' => 1, 'prossimi_eventi' => 1, 'statistiche' => 0,
-            'ordine'        => ['slideshow', 'annunci', 'card_aree', 'prossimi_eventi', 'statistiche'],
+            'slideshow' => 1, 'mia_prenotazione' => 1, 'annunci' => 0, 'card_aree' => 1,
+            'ultimi_posti' => 0, 'prossimi_eventi' => 1, 'statistiche' => 0,
+            'ordine'        => ['slideshow', 'mia_prenotazione', 'annunci', 'card_aree', 'ultimi_posti', 'prossimi_eventi', 'statistiche'],
             'aree_colonne'  => 2,         // 2 | 3 | 4 card per riga (desktop)
             'aree_max'      => 0,         // 0 = tutte; altrimenti le altre si aprono con "Mostra tutte"
             'eventi_num'    => 8,         // 4 | 8 | 12
@@ -1570,9 +1734,20 @@ if (!function_exists('get_widgets_home')) {
         $chiavi = widgets_home_default()['ordine'];
         foreach ($chiavi as $k) $w[$k] = (int)!empty($w[$k]);
 
-        // Ordine: solo chiavi note, senza duplicati; quelle mancanti in coda
+        // Ordine: solo chiavi note, senza duplicati. I widget nuovi (assenti in una
+        // configurazione salvata prima che esistessero) vanno subito dopo il widget
+        // che li precede nell'ordine predefinito, non in fondo alla pagina.
         $ordine = array_values(array_unique(array_intersect((array)$w['ordine'], $chiavi)));
-        $w['ordine'] = array_merge($ordine, array_diff($chiavi, $ordine));
+        foreach ($chiavi as $i => $k) {
+            if (in_array($k, $ordine, true)) continue;
+            $pos = 0;
+            for ($j = $i - 1; $j >= 0; $j--) {
+                $p = array_search($chiavi[$j], $ordine, true);
+                if ($p !== false) { $pos = $p + 1; break; }
+            }
+            array_splice($ordine, $pos, 0, [$k]);
+        }
+        $w['ordine'] = $ordine;
 
         $w['aree_colonne']  = in_array((int)$w['aree_colonne'], [2, 3, 4], true) ? (int)$w['aree_colonne'] : 2;
         $w['aree_max']      = max(0, min(48, (int)$w['aree_max']));
@@ -1583,15 +1758,45 @@ if (!function_exists('get_widgets_home')) {
 }
 
 // Migrazioni una tantum dello schema (funziona sia su MySQL che su MariaDB).
-// Il file marcatore evita di interrogare lo schema a ogni richiesta:
-// quando aggiungi una colonna qui, cambia anche il nome del marcatore.
+// UNICO punto in cui il codice modifica la struttura del database: nessuna pagina deve
+// eseguire ALTER/CREATE al volo. Il file marcatore evita di interrogare lo schema a ogni
+// richiesta: quando aggiungi qualcosa qui, cambia anche il nome del marcatore.
 if (!function_exists('assicura_schema')) {
     function assicura_schema($conn) {
-        $marker = __DIR__ . '/cache/schema_v4.ok';
+        $marker = __DIR__ . '/cache/schema_v7.ok';
         if (is_file($marker)) return;
+
+        // 1. Tabelle di servizio (prima create dalle singole pagine a ogni richiesta)
+        $tabelle = [
+            'slide_home' => "CREATE TABLE IF NOT EXISTS slide_home (
+                id INT AUTO_INCREMENT PRIMARY KEY, immagine_path VARCHAR(255) NOT NULL, titolo VARCHAR(255) DEFAULT '',
+                sottotitolo VARCHAR(255) DEFAULT '', link VARCHAR(500) DEFAULT '', ordine INT DEFAULT 0, attiva TINYINT(1) DEFAULT 1,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP, INDEX idx_ordine (ordine)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            'log_accessi' => "CREATE TABLE IF NOT EXISTS log_accessi (
+                id INT AUTO_INCREMENT PRIMARY KEY, utente_id INT DEFAULT NULL, email VARCHAR(255), nome VARCHAR(100), cognome VARCHAR(100),
+                ip VARCHAR(45), user_agent VARCHAR(512), tipo VARCHAR(20) DEFAULT 'sso', created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_uid (utente_id), INDEX idx_cat (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            'log_email' => "CREATE TABLE IF NOT EXISTS log_email (
+                id INT AUTO_INCREMENT PRIMARY KEY, destinatario VARCHAR(255), oggetto VARCHAR(255), esito TINYINT(1) DEFAULT 0,
+                canale VARCHAR(10) DEFAULT 'smtp', errore VARCHAR(500) DEFAULT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_cat (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+            'rate_limit_attempts' => "CREATE TABLE IF NOT EXISTS rate_limit_attempts (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, ip_hash CHAR(64) NOT NULL, endpoint VARCHAR(80) NOT NULL, hit_at DATETIME NOT NULL,
+                INDEX idx_ip_ep (ip_hash, endpoint), INDEX idx_hit (hit_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        ];
+        foreach ($tabelle as $nome => $ddl) {
+            if (!$conn->query($ddl)) { error_log("[assicura_schema] CREATE fallito su $nome: " . $conn->error); return; }
+        }
+
+        // 2. Colonne: 'tabella' => ['colonna' => ALTER] oppure ['colonna' => [ALTER, SQL da eseguire subito dopo averla creata]]
         $colonne = [
             'turni' => [
                 'nome_turno' => "ADD COLUMN nome_turno VARCHAR(150) DEFAULT NULL AFTER evento_id, MODIFY data_turno DATE NULL DEFAULT NULL, MODIFY orario_inizio TIME NULL DEFAULT NULL, MODIFY orario_fine TIME NULL DEFAULT NULL",
+                'token_checkin' => "ADD COLUMN token_checkin VARCHAR(64) DEFAULT NULL",
             ],
             'sondaggi_domande' => [
                 'condizione_json' => "ADD COLUMN condizione_json TEXT NULL",
@@ -1606,21 +1811,72 @@ if (!function_exists('assicura_schema')) {
                 'annuncio_home'   => "ADD COLUMN annuncio_home TEXT DEFAULT NULL",
                 'annuncio_colore' => "ADD COLUMN annuncio_colore VARCHAR(20) DEFAULT 'info'",
             ],
+            'prenotazioni' => [
+                'presente'                  => "ADD COLUMN presente INT DEFAULT 0 AFTER stato",
+                'data_presenza'             => "ADD COLUMN data_presenza DATETIME DEFAULT NULL",
+                'scadenza_conferma'         => "ADD COLUMN scadenza_conferma DATETIME DEFAULT NULL",
+                'reminder_inviato'          => "ADD COLUMN reminder_inviato TINYINT(1) NOT NULL DEFAULT 0",
+                'attestato_inviato'         => "ADD COLUMN attestato_inviato TINYINT(1) NOT NULL DEFAULT 0",
+                'email_post_evento_inviata' => "ADD COLUMN email_post_evento_inviata TINYINT(1) NOT NULL DEFAULT 0",
+                'token_sondaggio'           => "ADD COLUMN token_sondaggio VARCHAR(64) DEFAULT NULL",
+                'sondaggio_completato'      => "ADD COLUMN sondaggio_completato TINYINT(1) NOT NULL DEFAULT 0",
+            ],
+            'eventi' => [
+                'abilita_presenze'      => "ADD COLUMN abilita_presenze TINYINT(1) NOT NULL DEFAULT 1",
+                'blocca_auto_archivio'  => "ADD COLUMN blocca_auto_archivio TINYINT(1) NOT NULL DEFAULT 0",
+                'permessi_gestori_json' => "ADD COLUMN permessi_gestori_json TEXT DEFAULT NULL",
+            ],
             'pagine_eventi' => [
+                'copertina_path'        => "ADD COLUMN copertina_path VARCHAR(255) DEFAULT NULL",
+                'mostra_in_home'        => "ADD COLUMN mostra_in_home TINYINT(1) NOT NULL DEFAULT 1",
+                'limite_iscrizioni'     => "ADD COLUMN limite_iscrizioni VARCHAR(20) NOT NULL DEFAULT 'nessuno'",
                 // CSV dei gestori che ricevono le email sulle prenotazioni; NULL = tutti
                 'notifiche_gestori_ids' => "ADD COLUMN notifiche_gestori_ids TEXT DEFAULT NULL",
             ],
+            'sottocategorie' => [
+                // Sezione mostrata in alto, affiancata alle altre, nel layout Griglia (prima dedotto dal nome).
+                // Alla creazione conserva l'aspetto attuale delle sezioni che prima venivano riconosciute dal nome.
+                'affiancata_in_alto' => ["ADD COLUMN affiancata_in_alto TINYINT(1) NOT NULL DEFAULT 0",
+                    "UPDATE sottocategorie SET affiancata_in_alto = 1 WHERE nome LIKE '%Online%' OR nome LIKE '%Generali%' OR nome LIKE '%Speciali%' OR nome LIKE '%Conclusive%'"],
+            ],
+            'utenti' => [
+                'matricola_studente'   => "ADD COLUMN matricola_studente VARCHAR(50) DEFAULT NULL",
+                'matricola_dipendente' => "ADD COLUMN matricola_dipendente VARCHAR(50) DEFAULT NULL",
+                'ultimo_accesso'       => "ADD COLUMN ultimo_accesso DATETIME DEFAULT NULL",
+                'ruoli_secondari'      => "ADD COLUMN ruoli_secondari VARCHAR(255) DEFAULT ''",
+                'email_personalizzata' => "ADD COLUMN email_personalizzata TINYINT(1) NOT NULL DEFAULT 0",
+            ],
         ];
         foreach ($colonne as $tabella => $cols) {
-            foreach ($cols as $col => $alter) {
+            foreach ($cols as $col => $def) {
+                [$alter, $dopo] = is_array($def) ? $def : [$def, null];
                 $chk = $conn->query("SHOW COLUMNS FROM `$tabella` LIKE '$col'");
                 if (!$chk) return;
-                if ($chk->num_rows === 0 && !$conn->query("ALTER TABLE `$tabella` $alter")) {
+                if ($chk->num_rows > 0) continue;
+                if (!$conn->query("ALTER TABLE `$tabella` $alter")) {
                     error_log("[assicura_schema] ALTER fallito su $tabella.$col: " . $conn->error);
                     return;
                 }
+                if ($dopo !== null) $conn->query($dopo);
             }
         }
+
+        // 3. Tipi di colonna da correggere nei database più vecchi
+        $tipi = [
+            // stato era ENUM senza 'annullata' (prima controllato in config.php a ogni richiesta)
+            ['prenotazioni', 'stato', fn($t) => str_contains($t, 'enum'), "MODIFY COLUMN stato VARCHAR(50) DEFAULT 'confermata'"],
+            // matricola nata numerica, ma può contenere lettere (prima ALTER in saml_login.php a ogni login)
+            ['utenti', 'matricola', fn($t) => !str_contains($t, 'varchar'), "MODIFY COLUMN matricola VARCHAR(50) DEFAULT NULL"],
+        ];
+        foreach ($tipi as [$tabella, $col, $da_correggere, $alter]) {
+            $res = $conn->query("SHOW COLUMNS FROM `$tabella` LIKE '$col'");
+            $riga = $res ? $res->fetch_assoc() : null;
+            if ($riga && $da_correggere(strtolower((string)$riga['Type'])) && !$conn->query("ALTER TABLE `$tabella` $alter")) {
+                error_log("[assicura_schema] MODIFY fallito su $tabella.$col: " . $conn->error);
+                return;
+            }
+        }
+
         if (!is_dir(__DIR__ . '/cache')) @mkdir(__DIR__ . '/cache', 0755, true);
         @file_put_contents($marker, date('c'));
     }

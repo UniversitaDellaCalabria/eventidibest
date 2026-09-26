@@ -9,13 +9,6 @@ if (!check_rate_limit($conn, 'saml_login', 15, 300)) {
     die("Troppi tentativi di accesso. Attendi qualche minuto e riprova.");
 }
 
-// ADEGUAMENTO STRUTTURA TABELLA UTENTI E AUTO-RIPRISTINO RUOLI
-@$conn->query("ALTER TABLE utenti MODIFY COLUMN matricola VARCHAR(50) DEFAULT NULL");
-@$conn->query("ALTER TABLE utenti ADD COLUMN matricola_studente VARCHAR(50) DEFAULT NULL AFTER matricola");
-@$conn->query("ALTER TABLE utenti ADD COLUMN matricola_dipendente VARCHAR(50) AFTER matricola_studente");
-@$conn->query("ALTER TABLE utenti ADD COLUMN ultimo_accesso DATETIME DEFAULT NULL");
-@$conn->query("ALTER TABLE utenti ADD COLUMN ruoli_secondari VARCHAR(255) DEFAULT ''");
-@$conn->query("ALTER TABLE utenti ADD COLUMN email_personalizzata TINYINT(1) NOT NULL DEFAULT 0");
 
 $conn->query("INSERT IGNORE INTO ruoli (id, nome) VALUES 
     (1, 'Amministratore'), 

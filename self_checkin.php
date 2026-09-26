@@ -8,8 +8,6 @@ if (empty($_SESSION['utente_id'])) {
     exit;
 }
 
-// Auto-Patch database
-@$conn->query("ALTER TABLE prenotazioni ADD COLUMN data_presenza DATETIME NULL");
 
 $t_id = (int)($_GET['t'] ?? 0);
 $token = trim($_GET['k'] ?? '');

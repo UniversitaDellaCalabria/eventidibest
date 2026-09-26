@@ -179,7 +179,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_prenotazione_ute
     if ($update_ok) {
         if ($nuovo_stato === 'confermata') { decadi_attese_vincolate($conn, $pr_id); }
         if ($nuovo_turno_id > 0 && $nuovo_turno_id !== $turno_attuale_id) {
-            $res_promo = $conn->query("SELECT * FROM prenotazioni WHERE turno_id = $turno_attuale_id AND stato = 'in_attesa' ORDER BY data_prenotazione ASC LIMIT 1");
+            $res_promo = $conn->query("SELECT * FROM prenotazioni WHERE turno_id = $turno_attuale_id AND stato = 'in_attesa' ORDER BY data_prenotazione ASC, id ASC LIMIT 1");
             if ($res_promo && $u_promo = $res_promo->fetch_assoc()) {
                 $id_promo = (int)$u_promo['id'];
                 $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = $id_promo");
@@ -193,7 +193,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_prenotazione_ute
 
                 $obj_tpl_promo = "Posto Disponibile! Prenotazione CONFERMATA";
                 $body_tpl_promo = "<p>Ottime notizie <strong>" . htmlspecialchars($u_promo['nome']) . "</strong>!</p><p>Si è appena liberato un posto e la tua prenotazione in lista d'attesa è passata a <strong>CONFERMATA UFFICIALMENTE</strong>.</p>$btn_ricevuta_html";
-                inviaNotificaEmail($u_promo['email'], $obj_tpl_promo, $body_tpl_promo, $conn);
+                inviaNotificaEmail($u_promo['email'], $obj_tpl_promo, $body_tpl_promo, $conn, colore_area_turno($conn, $turno_attuale_id));
             }
             
             $msg_extra = $nuovo_stato === 'in_attesa' ? " Sei stato inserito in Lista d'Attesa per il nuovo orario." : " Turno aggiornato con successo!";
@@ -239,16 +239,16 @@ if (isset($_GET['cancella_prenotazione'])) {
 
         $obj_tpl  = $sys_email['email_canc_utente_oggetto'] ?: 'Cancellazione Prenotazione Confermata';
         $body_tpl = $sys_email['email_canc_utente_corpo'] ?: "<p>Gentile <strong>{NOME} {COGNOME}</strong>,</p><p>La tua prenotazione per l'evento <strong>{TITOLO_EVENTO}</strong> è stata cancellata con successo.</p>";
-        inviaNotificaEmail($p_data['email'], str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn);
+        inviaNotificaEmail($p_data['email'], str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn, colore_area_turno($conn, $p_data['turno_id']));
 
         $obj_gest = "Avviso Disdetta: " . $p_data['evento_titolo'];
         $body_gest = "<p>Gentile Gestore,</p><p>L'utente <strong>" . htmlspecialchars($p_data['nome'] . ' ' . $p_data['cognome']) . "</strong> ha appena <strong>annullato</strong> la sua prenotazione per l'evento <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong> del " . htmlspecialchars($data_formatted) . ".</p>";
         foreach (get_email_gestori_evento($conn, (int)$p_data['evento_id']) as $em_gest) {
-            inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn);
+            inviaNotificaEmail($em_gest, $obj_gest, $body_gest, $conn, colore_area_turno($conn, $p_data['turno_id']));
         }
 
         if ($was_confermata) {
-            $res_promo = $conn->query("SELECT * FROM prenotazioni WHERE turno_id = $tid_promo AND stato = 'in_attesa' ORDER BY data_prenotazione ASC LIMIT 1");
+            $res_promo = $conn->query("SELECT * FROM prenotazioni WHERE turno_id = $tid_promo AND stato = 'in_attesa' ORDER BY data_prenotazione ASC, id ASC LIMIT 1");
             if ($res_promo && $u_promo = $res_promo->fetch_assoc()) {
                 $id_promo = (int)$u_promo['id'];
                 $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = $id_promo");
@@ -264,7 +264,7 @@ if (isset($_GET['cancella_prenotazione'])) {
                 $body_tpl_promo = "<p>Ottime notizie <strong>{NOME} {COGNOME}</strong>!</p><p>Si è appena liberato un posto e la tua prenotazione in lista d'attesa per l'evento <strong>{TITOLO_EVENTO}</strong> è passata a <strong>CONFERMATA UFFICIALMENTE</strong>.</p>{LINK_RICEVUTA}";
                 
                 $r_repl_promo = [$u_promo['nome'], $u_promo['cognome'], $u_promo['matricola'], $p_data['evento_titolo'], $data_formatted, $ora_formatted, $p_data['luogo'], $u_promo['codice_prenotazione'], $btn_ricevuta_html];
-                inviaNotificaEmail($u_promo['email'], str_replace($r_find, $r_repl_promo, $obj_tpl_promo), str_replace($r_find, $r_repl_promo, $body_tpl_promo), $conn);
+                inviaNotificaEmail($u_promo['email'], str_replace($r_find, $r_repl_promo, $obj_tpl_promo), str_replace($r_find, $r_repl_promo, $body_tpl_promo), $conn, colore_area_turno($conn, $tid_promo));
             }
         }
 
@@ -322,7 +322,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['conferma_posto_ok'])
         $body_cp = "<p>Gentile <strong>" . htmlspecialchars($p_cp['nome'] . ' ' . $p_cp['cognome']) . "</strong>,</p>"
                  . "<p>hai confermato il tuo posto per <strong>" . htmlspecialchars($p_cp['evento_titolo']) . "</strong> (" . htmlspecialchars(etichetta_turno($p_cp)) . "). La prenotazione è <strong>CONFERMATA</strong>.</p>"
                  . "<p style='margin-top:15px;'><a href='$link_ricevuta_cp' target='_blank' style='background:#B80000; color:#ffffff; padding:10px 18px; text-decoration:none; border-radius:6px; font-weight:bold;'>📄 Scarica / Stampa Ricevuta PDF</a></p>";
-        inviaNotificaEmail($p_cp['email'], "Prenotazione CONFERMATA: " . $p_cp['evento_titolo'], $body_cp, $conn);
+        inviaNotificaEmail($p_cp['email'], "Prenotazione CONFERMATA: " . $p_cp['evento_titolo'], $body_cp, $conn, colore_area_turno($conn, $p_cp['turno_id']));
         $_SESSION['msg_area_pers'] = "<div class='alert alert-success fw-bold text-center my-3 shadow-sm border-0 border-start border-5 border-success'><i class='fa fa-check-circle me-1'></i> Posto confermato! Ti abbiamo inviato la ricevuta via email.</div>";
     } else {
         // Il posto passa subito al prossimo in lista d'attesa
@@ -459,6 +459,10 @@ foreach ($righe_prenotazioni as $row) {
         $prenotazioni_passate[] = $row;
     }
 }
+
+// Posizione in lista d'attesa ("Sei 3° in lista") per le prenotazioni in coda
+$pos_attesa = get_posizioni_lista_attesa($conn, array_column(
+    array_filter($prenotazioni_attive, fn($p) => ($p['stato'] ?? '') === 'in_attesa'), 'id'));
 
 // RECUPERO TUTTI I MESSAGGI PER LE PRENOTAZIONI DELL'UTENTE
 $all_pr_ids     = array_merge(array_column($prenotazioni_attive, 'id'), array_column($prenotazioni_passate, 'id'));
@@ -622,7 +626,7 @@ require_once 'header.php';
                 <div class="d-flex flex-column gap-3">
                     <?php foreach ($prenotazioni_attive as $pr): ?>
                         <?php
-                            $col_p   = $pr['colore_primario'] ?: '#0056b3';
+                            $col_p   = colore_valido($pr['colore_primario'] ?? '', '#0056B3');
                             $st      = $pr['stato'];
                             $cd      = countdown_to($pr['data_turno'], $pr['orario_inizio']);
                             $unread  = 0;
@@ -666,7 +670,15 @@ require_once 'header.php';
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
                                     <div>
                                         <?php
-                                        if ($st === 'in_attesa')     echo '<span class="badge bg-warning text-dark px-3 py-2"><i class="fa fa-clock me-1"></i>Lista d\'Attesa</span>';
+                                        if ($st === 'in_attesa') {
+                                            echo '<span class="badge bg-warning text-dark px-3 py-2"><i class="fa fa-clock me-1" aria-hidden="true"></i>Lista d\'Attesa</span>';
+                                            if (isset($pos_attesa[(int)$pr['id']])) {
+                                                $pa = $pos_attesa[(int)$pr['id']];
+                                                echo ' <span class="badge bg-light text-dark border px-3 py-2" title="Persone in lista d\'attesa per questo turno: ' . $pa['totale'] . '">'
+                                                   . ($pa['posizione'] === 1 ? 'Sei il prossimo in lista!' : 'Sei ' . $pa['posizione'] . '° in lista')
+                                                   . ' <span class="fw-normal text-muted">su ' . $pa['totale'] . '</span></span>';
+                                            }
+                                        }
                                         elseif ($st === 'richiesta_conferma') echo '<span class="badge bg-warning text-dark px-3 py-2"><i class="fa fa-bell me-1"></i>Posto disponibile</span> <a href="area_personale.php?conferma_posto=' . (int)$pr['id'] . '" class="btn btn-success btn-sm fw-bold ms-1"><i class="fa fa-check me-1"></i>Conferma ora</a>';
                                         elseif ($st === 'da_approvare') echo '<span class="badge bg-info text-dark px-3 py-2"><i class="fa fa-hourglass-half me-1"></i>In Valutazione</span>';
                                         elseif ($st === 'rifiutata')  echo '<span class="badge bg-secondary px-3 py-2"><i class="fa fa-times me-1"></i>Rifiutata</span>';
@@ -737,7 +749,7 @@ require_once 'header.php';
                                                         <div class="d-flex justify-content-start mb-3">
                                                             <div style="max-width: 80%;">
                                                                 <div class="small text-muted mb-1" style="font-size: 0.7rem;">Segreteria - <?php echo date('d/m/Y H:i', strtotime($msg['data_invio'])); ?></div>
-                                                                <div class="p-2 rounded-3 text-white shadow-sm" style="background-color: #B80000; border-bottom-left-radius: 0 !important;">
+                                                                <?php $col_bolla = colore_valido($pr['colore_primario'] ?? '', '#B80000'); ?><div class="p-2 rounded-3 shadow-sm" style="background-color: <?php echo $col_bolla; ?>; color: <?php echo colore_testo_su($col_bolla); ?>; border-bottom-left-radius: 0 !important;">
                                                                     <?php echo strip_tags($msg['messaggio'], '<b><strong><i><em><u><br><p><ul><ol><li><span>'); ?>
                                                                 </div>
                                                             </div>
@@ -942,7 +954,7 @@ require_once 'header.php';
                                                         <div class="d-flex justify-content-start mb-3">
                                                             <div style="max-width: 80%;">
                                                                 <div class="small text-muted mb-1" style="font-size: 0.7rem;">Segreteria - <?php echo date('d/m/Y H:i', strtotime($msg['data_invio'])); ?></div>
-                                                                <div class="p-2 rounded-3 text-white shadow-sm" style="background-color: #B80000; border-bottom-left-radius: 0 !important;">
+                                                                <?php $col_bolla = colore_valido($pr['colore_primario'] ?? '', '#B80000'); ?><div class="p-2 rounded-3 shadow-sm" style="background-color: <?php echo $col_bolla; ?>; color: <?php echo colore_testo_su($col_bolla); ?>; border-bottom-left-radius: 0 !important;">
                                                                     <?php echo strip_tags($msg['messaggio'], '<b><strong><i><em><u><br><p><ul><ol><li><span>'); ?>
                                                                 </div>
                                                             </div>
@@ -974,10 +986,6 @@ require_once 'header.php';
         <!-- TAB 3: SONDAGGI (AGGIORNATO AL MOTORE INTERNO) -->
         <div class="tab-pane fade" id="pills-sondaggi" role="tabpanel" tabindex="0">
             <?php 
-                $check_col = $conn->query("SHOW COLUMNS FROM prenotazioni LIKE 'token_sondaggio'");
-                if ($check_col && $check_col->num_rows == 0) {
-                    $conn->query("ALTER TABLE prenotazioni ADD COLUMN token_sondaggio VARCHAR(64) NULL, ADD COLUMN sondaggio_completato TINYINT(1) DEFAULT 0");
-                }
 
                 $sondaggi_disponibili = 0;
                 $eventi_con_sondaggio = [];

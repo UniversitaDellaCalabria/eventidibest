@@ -31,8 +31,6 @@ if (!$lock_handle_bg || !flock($lock_handle_bg, LOCK_EX | LOCK_NB)) {
     die("PROCESSO IN ESECUZIONE: cron_background.php è già in esecuzione in un altro processo (avviato meno di 10 minuti fa).\n");
 }
 
-// AUTO-PATCH colonne che potrebbero mancare nei DB più vecchi
-$conn->query("ALTER TABLE prenotazioni ADD COLUMN IF NOT EXISTS email_post_evento_inviata TINYINT(1) DEFAULT 0");
 
 $now = date('Y-m-d H:i:s');
 $sys = $conn->query("SELECT * FROM impostazioni_sistema WHERE id = 1")->fetch_assoc();
@@ -73,11 +71,11 @@ if ($res_post && $res_post->num_rows > 0) {
 
         // 1. Invia Avviso Attestato Disponibile (se configurato)
         if (!empty($sys['email_attestato_corpo'])) {
-            inviaNotificaEmail($p['email'], str_replace($r_find, $r_repl, $sys['email_attestato_oggetto']), str_replace($r_find, $r_repl, $sys['email_attestato_corpo']), $conn);
+            inviaNotificaEmail($p['email'], str_replace($r_find, $r_repl, $sys['email_attestato_oggetto']), str_replace($r_find, $r_repl, $sys['email_attestato_corpo']), $conn, colore_area_turno($conn, $p['turno_id']));
         }
         // 2. Invia Sondaggio (se configurato)
         if (!empty($sys['email_sondaggio_corpo'])) {
-            inviaNotificaEmail($p['email'], str_replace($r_find, $r_repl, $sys['email_sondaggio_oggetto']), str_replace($r_find, $r_repl, $sys['email_sondaggio_corpo']), $conn);
+            inviaNotificaEmail($p['email'], str_replace($r_find, $r_repl, $sys['email_sondaggio_oggetto']), str_replace($r_find, $r_repl, $sys['email_sondaggio_corpo']), $conn, colore_area_turno($conn, $p['turno_id']));
         }
 
         // Segna come inviata per non spammare l'utente al prossimo giro di Cron

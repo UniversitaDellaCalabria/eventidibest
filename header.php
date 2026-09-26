@@ -218,6 +218,20 @@ if ($u_logged_header) {
             padding: 0.45rem 0; border-bottom: 1px solid rgba(255,255,255,0.12);
             margin-bottom: 0.4rem;
         }
+
+        /* ── Accessibilità (verifica axe/Lighthouse del 25/09/2026) ── */
+        /* In Bootstrap Italia bg-warning è arancione (#fd7e14) e .badge forza il bianco:
+           il testo scuro richiesto con text-dark va imposto, altrimenti contrasto 2.6:1 */
+        .bg-warning.text-dark, .badge.bg-warning, .badge.bg-info.text-dark { color: #1F2937 !important; }
+        /* Focus da tastiera sempre ben visibile (anche su card-link e pulsanti colorati) */
+        a:focus-visible, button:focus-visible, .btn:focus-visible, [tabindex]:focus-visible,
+        .form-check-input:focus-visible, summary:focus-visible {
+            outline: 3px solid #FFBF47 !important; outline-offset: 2px !important; box-shadow: 0 0 0 5px #1F2937 !important;
+        }
+        a:focus-visible .card { box-shadow: 0 0 0 3px #FFBF47 !important; }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; scroll-behavior: auto !important; }
+        }
     </style>
 </head>
 <body>
@@ -238,7 +252,7 @@ if ($u_logged_header) {
     });
 </script>
 
-<div class="top-bar-istituzionale d-none d-lg-block">
+<div class="top-bar-istituzionale d-none d-lg-block" role="region" aria-label="Barra istituzionale e strumenti di accessibilità">
     <div class="container">
         <div class="d-flex justify-content-between align-items-center">
             
@@ -266,7 +280,7 @@ if ($u_logged_header) {
                                 <li><a class="list-item" href="area_personale.php"><i class="fa fa-id-card text-primary me-2" aria-hidden="true"></i> Area Personale</a></li>
                                 <?php if ($is_admin_header): ?>
                                     <li><a class="list-item" href="admin/index.php"><i class="fa fa-cogs text-danger me-2" aria-hidden="true"></i> Pannello Gestori</a></li>
-                                    <li><a class="list-item" href="checkin.php" target="_blank"><i class="fa fa-qrcode text-success me-2" aria-hidden="true"></i> Scanner Check-in</a></li>
+                                    <li><a class="list-item" href="admin/scanner.php"><i class="fa fa-qrcode text-success me-2" aria-hidden="true"></i> Scanner Check-in</a></li>
                                 <?php endif; ?>
                                 <li><div class="divider" aria-hidden="true"></div></li>
                                 <li><a class="list-item text-danger" href="esci.php"><i class="fa fa-sign-out-alt me-2" aria-hidden="true"></i> Esci</a></li>
@@ -384,7 +398,7 @@ if ($u_logged_header) {
             <a href="area_personale.php" class="mob-nav-link"><i class="fa fa-id-card me-2" style="color:#60a5fa;" aria-hidden="true"></i> Area Personale</a>
             <?php if ($is_admin_header): ?>
                 <a href="admin/index.php" class="mob-nav-link"><i class="fa fa-cogs me-2" style="color:#f59e0b;" aria-hidden="true"></i> Pannello Gestori</a>
-                <a href="checkin.php" target="_blank" class="mob-nav-link"><i class="fa fa-qrcode me-2" style="color:#34d399;" aria-hidden="true"></i> Scanner Check-in</a>
+                <a href="admin/scanner.php" class="mob-nav-link"><i class="fa fa-qrcode me-2" style="color:#34d399;" aria-hidden="true"></i> Scanner Check-in</a>
             <?php endif; ?>
             <a href="esci.php" class="mob-nav-link" style="color:#f87171;font-weight:bold;"><i class="fa fa-sign-out-alt me-2" aria-hidden="true"></i> Esci</a>
         <?php else: ?>

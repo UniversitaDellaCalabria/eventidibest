@@ -8,20 +8,6 @@ if (!$is_full_admin) {
     require_once 'admin_footer.php'; exit;
 }
 
-// Crea la tabella se non esiste ancora
-@$conn->query("CREATE TABLE IF NOT EXISTS log_accessi (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    utente_id INT DEFAULT NULL,
-    email VARCHAR(255),
-    nome VARCHAR(100),
-    cognome VARCHAR(100),
-    ip VARCHAR(45),
-    user_agent VARCHAR(512),
-    tipo VARCHAR(20) DEFAULT 'sso',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_uid (utente_id),
-    INDEX idx_cat (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
 $per_page = 50;
 $page     = max(1, (int)($_GET['page'] ?? 1));

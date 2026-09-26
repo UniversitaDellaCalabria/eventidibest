@@ -208,10 +208,6 @@ if (!$is_archivio) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $ev_id = (int)$_POST['evento_id'];
         sond_richiedi($conn, 'evento', $ev_id, $filtro_p, $sql_filtro_eventi_rbac);
-        $check_col = $conn->query("SHOW COLUMNS FROM prenotazioni LIKE 'token_sondaggio'");
-        if ($check_col && $check_col->num_rows == 0) {
-            $conn->query("ALTER TABLE prenotazioni ADD COLUMN token_sondaggio VARCHAR(64) NULL, ADD COLUMN sondaggio_completato TINYINT(1) DEFAULT 0");
-        }
         $sys = $conn->query("SELECT email_sondaggio_oggetto, email_sondaggio_corpo FROM impostazioni_sistema WHERE id = 1")->fetch_assoc();
         $oggetto_base = $sys['email_sondaggio_oggetto'] ?: 'La tua opinione è importante! Sondaggio Evento: {TITOLO_EVENTO}';
         $corpo_base = $sys['email_sondaggio_corpo'] ?: '<p>Gentile <strong>{NOME} {COGNOME}</strong>,</p><p>Ti ringraziamo per aver partecipato all\'evento <strong>{TITOLO_EVENTO}</strong>.</p><p>La tua opinione per noi è fondamentale. Ti invitiamo a compilare il questionario di gradimento in forma <strong>totalmente anonima</strong>.</p><div style="text-align:center;margin:35px 0;">{LINK_SONDAGGIO}</div>';
@@ -236,7 +232,7 @@ if (!$is_archivio) {
                 $ora_f  = orario_turno($p);
                 $data_f = !empty($p['data_turno']) ? date('d/m/Y', strtotime($p['data_turno'])) : '';
                 $r_repl = [$p['nome'],$p['cognome'],$p['matricola'],$p['evento_titolo'],$data_f,$ora_f,$p['evento_luogo'],$btn_sondaggio];
-                inviaNotificaEmail($p['email'], str_replace($r_find, $r_repl, $oggetto_base), str_replace($r_find, $r_repl, $corpo_base), $conn);
+                inviaNotificaEmail($p['email'], str_replace($r_find, $r_repl, $oggetto_base), str_replace($r_find, $r_repl, $corpo_base), $conn, colore_area_turno($conn, $p['turno_id']));
                 $count++;
             }
         }

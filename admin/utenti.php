@@ -13,10 +13,6 @@ function admin_redirect($url) {
     exit;
 }
 
-// Auto-patch colonna permessi singoli eventi
-$chk_col = $conn->query("SHOW COLUMNS FROM eventi LIKE 'permessi_gestori_json'");
-if ($chk_col && $chk_col->num_rows == 0)
-    $conn->query("ALTER TABLE eventi ADD COLUMN permessi_gestori_json TEXT NULL AFTER gestori_utenti_ids");
 
 // ==============================================================================
 // BACKEND: UTENTI & GRUPPI

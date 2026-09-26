@@ -9,11 +9,6 @@ if ($t_id === 0) {
     exit;
 }
 
-// Creazione colonna Token se mancante
-$check_col = $conn->query("SHOW COLUMNS FROM turni LIKE 'token_checkin'");
-if ($check_col && $check_col->num_rows == 0) {
-    $conn->query("ALTER TABLE turni ADD COLUMN token_checkin VARCHAR(64) NULL");
-}
 
 // Ruota token
 if (isset($_GET['rotate']) && $_GET['rotate'] == 1) {

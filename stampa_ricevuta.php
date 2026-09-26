@@ -24,6 +24,11 @@ $has_valid_code = (!empty($code) && $p['codice_prenotazione'] === $code);
 
 if (!$is_admin_or_gestore && !$is_owner && !$has_valid_code) { die("Accesso non autorizzato a questa ricevuta."); }
 
+// Colore dell'area (sfondi) e versione leggibile per i testi su bianco
+$col_ric       = colore_valido($p['colore_primario'] ?? '', '#B80000');
+$col_ric_txt   = colore_testo_su($col_ric);
+$col_ric_testo = $col_ric_txt === '#FFFFFF' ? $col_ric : '#1F2937';
+
 $json_custom = json_decode($p['dati_custom_json'] ?? '', true) ?: [];
 
 // GENERAZIONE LINK PER IL QR CODE
@@ -43,8 +48,7 @@ $qr_api_url = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" .
     <style>
         body { background-color: #f8fafc; font-family: 'Segoe UI', sans-serif; color: #334155; }
         .ticket-box { max-width: 800px; margin: 30px auto; background: #fff; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); border: 2px solid #e2e8f0; overflow: hidden; }
-        /* Aggiornato il rosso a #B80000 */
-        .ticket-header { background: #B80000; color: white; padding: 25px; border-bottom: 4px solid #7a0000; }
+        .ticket-header { background: <?php echo $col_ric; ?>; color: <?php echo $col_ric_txt; ?>; padding: 25px; border-bottom: 4px solid rgba(0,0,0,.25); }
         .ticket-body { padding: 30px; }
         .code-badge { font-size: 1.4rem; font-weight: 800; background: #f1f5f9; color: #0f172a; padding: 8px 16px; border-radius: 8px; border: 1px dashed #cbd5e1; display: inline-block; letter-spacing: 2px; }
         @media print { body { background: white; } .no-print { display: none !important; } .ticket-box { box-shadow: none; border: 1px solid #000; margin: 0; max-width: 100%; } }
@@ -54,7 +58,7 @@ $qr_api_url = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" .
 
     <div class="container text-center my-4 no-print">
         <!-- Aggiornato il colore del bottone -->
-        <button onclick="window.print()" class="btn btn-danger fw-bold px-4 py-2 shadow-sm" style="background:#B80000; border:none;"><i class="fa fa-print me-1"></i> Stampa / PDF</button>
+        <button onclick="window.print()" class="btn fw-bold px-4 py-2 shadow-sm" style="background:<?php echo $col_ric; ?>; color:<?php echo $col_ric_txt; ?>; border:none;"><i class="fa fa-print me-1"></i> Stampa / PDF</button>
         <button onclick="window.close()" class="btn btn-outline-secondary btn-sm ms-2">Chiudi</button>
     </div>
 
@@ -69,7 +73,7 @@ $qr_api_url = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" .
                 </div>
             </div>
             <div class="text-end">
-                <span class="badge bg-white text-danger fw-bold text-uppercase fs-6 px-3 py-2 shadow-sm" style="color: #B80000 !important;">RICEVUTA DI PRENOTAZIONE</span>
+                <span class="badge bg-white fw-bold text-uppercase fs-6 px-3 py-2 shadow-sm" style="color: <?php echo $col_ric_testo; ?> !important;">RICEVUTA DI PRENOTAZIONE</span>
             </div>
         </div>
 
@@ -98,17 +102,17 @@ $qr_api_url = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" .
 
             <div class="row g-4 mb-4">
                 <div class="col-md-6 border-end">
-                    <h6 class="fw-bold border-bottom pb-2 mb-3" style="color: #B80000;"><i class="fa fa-calendar-alt me-1"></i> Dettaglio Evento</h6>
+                    <h6 class="fw-bold border-bottom pb-2 mb-3" style="color: <?php echo $col_ric_testo; ?>;"><i class="fa fa-calendar-alt me-1"></i> Dettaglio Evento</h6>
                     <p class="mb-2"><strong>Iniziativa:</strong> <br><span class="text-secondary"><?php echo htmlspecialchars($p['pagina_titolo']); ?></span></p>
                     <p class="mb-2"><strong>Attività:</strong> <br><span class="text-dark fw-bold"><?php echo htmlspecialchars($p['evento_titolo']); ?></span></p>
                     <?php if (!empty($p['nome_turno'])): ?><p class="mb-2"><strong>Turno / Gruppo:</strong> <br><span class="fw-bold text-dark">🏷️ <?php echo htmlspecialchars($p['nome_turno']); ?></span></p><?php endif; ?>
-                    <?php if (!empty($p['data_turno'])): ?><p class="mb-2"><strong>Data:</strong> <br><span class="fw-bold" style="color: #B80000;">📅 <?php echo date('d/m/Y', strtotime($p['data_turno'])); ?></span></p><?php endif; ?>
+                    <?php if (!empty($p['data_turno'])): ?><p class="mb-2"><strong>Data:</strong> <br><span class="fw-bold" style="color: <?php echo $col_ric_testo; ?>;">📅 <?php echo date('d/m/Y', strtotime($p['data_turno'])); ?></span></p><?php endif; ?>
                     <?php if (orario_turno($p) !== ''): ?><p class="mb-2"><strong>Orario:</strong> <br><span class="text-dark">🕒 <?php echo orario_turno($p); ?></span></p><?php endif; ?>
                     <p class="mb-0"><strong>Luogo:</strong> <br><span class="text-secondary">📍 <?php echo htmlspecialchars($p['evento_luogo'] ?: 'DiBEST Unical'); ?></span></p>
                 </div>
 
                 <div class="col-md-6">
-                    <h6 class="fw-bold border-bottom pb-2 mb-3" style="color: #B80000;"><i class="fa fa-user me-1"></i> Partecipante</h6>
+                    <h6 class="fw-bold border-bottom pb-2 mb-3" style="color: <?php echo $col_ric_testo; ?>;"><i class="fa fa-user me-1"></i> Partecipante</h6>
                     <p class="mb-2"><strong>Nominativo:</strong> <br><span class="text-dark fw-bold"><?php echo htmlspecialchars($p['nome'] . ' ' . $p['cognome']); ?></span></p>
                     <p class="mb-2"><strong>Email:</strong> <br><span class="text-secondary"><?php echo htmlspecialchars($p['email']); ?></span></p>
                     <p class="mb-2"><strong>Matricola:</strong> <br><span class="text-secondary"><?php echo htmlspecialchars($p['matricola_effettiva'] ?: 'N/D'); ?></span></p>
@@ -118,7 +122,7 @@ $qr_api_url = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=" .
 
             <?php if (!empty($json_custom)): ?>
                 <div class="bg-light p-3 rounded border mb-4">
-                    <h6 class="fw-bold border-bottom pb-2 mb-3" style="color: #B80000;"><i class="fa fa-list-check me-1"></i> Informazioni Aggiuntive</h6>
+                    <h6 class="fw-bold border-bottom pb-2 mb-3" style="color: <?php echo $col_ric_testo; ?>;"><i class="fa fa-list-check me-1"></i> Informazioni Aggiuntive</h6>
                     <div class="row g-3">
                         <?php foreach ($json_custom as $key => $val): ?>
                             <div class="col-md-6">

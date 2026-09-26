@@ -4,12 +4,10 @@ if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once __DIR__ . '/../config.php';
 if (!function_exists('flash_set')) { require_once __DIR__ . '/../functions.php'; }
 
-// AUTO-PATCH colonna reminder_inviato
-$conn->query("ALTER TABLE prenotazioni ADD COLUMN IF NOT EXISTS reminder_inviato TINYINT(1) DEFAULT 0");
 
 // Invio tramite la funzione unica di functions.php (verifica risposte SMTP e scrive log_email)
-function inviaNotificaReminder($to, $subject, $body_html, $conn) {
-    return inviaNotificaEmail($to, $subject, $body_html, $conn);
+function inviaNotificaReminder($to, $subject, $body_html, $conn, $colore = null) {
+    return inviaNotificaEmail($to, $subject, $body_html, $conn, $colore);
 }
 
 // 1. Estrai template dal database
@@ -38,7 +36,7 @@ if ($res_target && $res_target->num_rows > 0) {
         $r_repl = [$p_data['nome'], $p_data['cognome'], $p_data['matricola'], $p_data['evento_titolo'], $data_formatted, $ora_formatted, $p_data['luogo'], $p_data['codice_prenotazione']];
 
         // Invia email
-        $mail_ok = inviaNotificaReminder($p_data['email'], str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn);
+        $mail_ok = inviaNotificaReminder($p_data['email'], str_replace($r_find, $r_repl, $obj_tpl), str_replace($r_find, $r_repl, $body_tpl), $conn, colore_area_turno($conn, $p_data['turno_id']));
         
         // Se inviata correttamente, segna come "reminder_inviato = 1" per non rimandarla
         if ($mail_ok) {

@@ -377,6 +377,11 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                     </a>
                 </li>
                 <li class="nav-item">
+                    <a class="nav-link w-100 <?php echo ($current_page == 'scanner.php') ? 'active' : ''; ?>" href="scanner.php?p_id=<?php echo $filtro_p; ?>">
+                        <i class="fa fa-qrcode me-2 text-center" style="width:20px;" aria-hidden="true"></i> Scanner Check-in
+                    </a>
+                </li>
+                <li class="nav-item">
                     <a class="nav-link w-100 <?php echo ($current_page == 'stampa_badge.php') ? 'active' : ''; ?>" href="stampa_badge.php?p_id=<?php echo $filtro_p; ?>">
                         <i class="fa fa-id-badge me-2 text-center" style="width:20px;"></i> Stampa Badge
                     </a>
@@ -471,7 +476,7 @@ $unread_count = $conn->query($unread_sql)->fetch_assoc()['total_unread'] ?? 0;
                 <button id="themeToggle" class="btn btn-outline-secondary btn-sm" title="Cambia tema" onclick="toggleTheme()">
                     <i class="fa fa-moon" id="themeIcon"></i>
                 </button>
-                <a href="../checkin.php" target="_blank" class="btn btn-warning btn-sm fw-bold text-dark shadow-sm" title="Apri Scanner Check-in"><i class="fa fa-qrcode"></i> <span class="d-none d-sm-inline">Scanner</span></a>
+                <a href="scanner.php?p_id=<?php echo $filtro_p; ?>" class="btn btn-warning btn-sm fw-bold text-dark shadow-sm" title="Apri Scanner Check-in"><i class="fa fa-qrcode"></i> <span class="d-none d-sm-inline">Scanner</span></a>
                 <a href="../index.php" target="_blank" class="btn btn-outline-secondary btn-sm" title="Vai al sito"><i class="fa fa-external-link-alt"></i> <span class="d-none d-sm-inline">Visita Sito</span></a>
                 <a href="../esci.php" class="btn btn-danger btn-sm" title="Esci"><i class="fa fa-sign-out-alt"></i></a>
             </div>

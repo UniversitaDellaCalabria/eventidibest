@@ -46,6 +46,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_sondaggio']) &
 }
 
 $page_cfg['titolo'] = "Questionario di Gradimento";
+// Colore dell'area dell'evento (default: rosso istituzionale del questionario)
+$col_sond     = !empty($prenotazione['turno_id']) ? colore_area_turno($conn, $prenotazione['turno_id']) : '#990000';
+$col_sond_txt = colore_testo_su($col_sond);
+$col_sond_tit = $col_sond_txt === '#FFFFFF' ? $col_sond : '#1F2937';
 require_once 'header.php';
 ?>
 
@@ -81,10 +85,10 @@ require_once 'header.php';
         </div>
 
     <?php else: ?>
-        <div class="card shadow-lg border-0" style="border-radius:12px; border-top:5px solid #990000 !important; background:#ffffff;">
+        <div class="card shadow-lg border-0" style="border-radius:12px; border-top:5px solid <?= $col_sond ?> !important; background:#ffffff;">
             <div class="card-header bg-white border-bottom p-4 text-center">
                 <span class="badge bg-success mb-2 px-3 py-2"><i class="fa fa-user-secret me-1"></i> Questionario 100% Anonimo</span>
-                <h2 class="fw-black m-0 mt-2" style="color:#990000;"><?= htmlspecialchars($sondaggio['titolo']) ?></h2>
+                <h2 class="fw-black m-0 mt-2" style="color:<?= $col_sond_tit ?>;"><?= htmlspecialchars($sondaggio['titolo']) ?></h2>
                 <h6 class="text-secondary mt-2 fw-bold">Evento: <?= htmlspecialchars($prenotazione['evento_titolo']) ?></h6>
             </div>
 
@@ -233,7 +237,7 @@ require_once 'header.php';
                     <?php endforeach; ?>
 
                     <div class="text-center mt-5">
-                        <button type="submit" name="submit_sondaggio" class="btn btn-danger btn-lg fw-bold px-5 py-3 shadow" style="background-color:#990000;">
+                        <button type="submit" name="submit_sondaggio" class="btn btn-lg fw-bold px-5 py-3 shadow" style="background-color:<?= $col_sond ?>; color:<?= $col_sond_txt ?>; border:none;">
                             <i class="fa fa-paper-plane me-2"></i> Invia Valutazione
                         </button>
                         <p class="text-muted small mt-3"><i class="fa fa-lock me-1"></i> I tuoi dati personali non verranno salvati né associati alle risposte.</p>

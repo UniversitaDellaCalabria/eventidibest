@@ -14,10 +14,16 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 ## Funzionalita
 
 - **Gestione eventi multi-area** con sezioni (Pagine) personalizzabili per colori, layout e accessi
-- **Prenotazioni con turni**: apertura/chiusura automatica, lista d'attesa, multi-posto, approvazione manuale
+- **7 layout di pagina**: griglia per sezioni, lista cronologica, elenco avanzato con ricerca, calendario, timeline, agenda a schede per giorno, gruppi/corsi — tutti gestiscono anche i turni senza data fissa
+- **Prenotazioni con turni**: nome, data e orari facoltativi, apertura/chiusura automatica, multi-posto, approvazione manuale
+- **Lista d'attesa**: posizione in coda visibile all'utente ("Sei 3° in lista"), posto liberato offerto con 24 ore per confermare o rinunciare, promozione automatica
+- **Limite iscrizioni per area** (un solo evento o un solo turno per evento): le liste d'attesa non contano e decadono alla prima conferma
 - **Autenticazione SSO** via SimpleSAMLphp (integrazione SSO Unical) + accesso esterno (CIE/SPID)
-- **RBAC** a 3 livelli: Super Admin, Gestore Area/Evento, Utente
-- **Check-in** tramite QR code (scanner da browser, self check-in studente) con email attestato automatica post-check-in
+- **RBAC** a 3 livelli: Super Admin, Gestore Area/Evento, Utente — ogni azione verifica che evento o prenotazione appartengano all'area del gestore
+- **Check-in** tramite QR code: scanner integrato nel pannello admin (scansione continua, contatore presenti in tempo reale, check-in manuale, lettori USB), self check-in studente, email attestato automatica post-check-in
+- **Home configurabile a widget**: carosello, la mia prossima prenotazione (con ricevuta QR), bacheca annunci, card aree, ultimi posti disponibili, prossimi appuntamenti, numeri del dipartimento — ordine con drag & drop, colonne e numero di card regolabili
+- **Gestione iscritti**: azioni di massa (presenze, approvazione, promozione dalla lista d'attesa, annullamento), prenotazione manuale
+- **Duplicazione** di eventi (con turni, campi del form e sondaggi) e di singoli turni
 - **Attestati** PDF generati automaticamente al completamento dell'evento
 - **Sondaggi/questionari** collegabili agli eventi: 15 tipi di campo (rating, NPS, matrice, scelta, testo, data, email…), ordinamento drag & drop, logica condizionale ("mostra se…"), anteprima interattiva, statistiche NPS ed export XLS
 - **Dashboard amministrativa** con KPI, grafici (Chart.js), messaggi non letti
@@ -25,8 +31,10 @@ Portale open-source per la gestione eventi, prenotazioni e presenze del **Dipart
 - **Menu di navigazione** a 3 livelli con ordinamento drag & drop
 - **Profilo utente**: pagina dedicata con dati SSO e modifica email personale
 - **Form builder** per campi prenotazione personalizzati per area/evento
-- **Email automatiche**: conferma, cancellazione, promemoria (via SMTP configurabile)
-- **Badge posti disponibili** in tempo reale sulle card eventi (liberi / lista d'attesa / esauriti / concluso)
+- **Email automatiche**: conferma, cancellazione, promemoria (via SMTP configurabile), con layout nel colore dell'area, registro degli invii ed email di prova dal pannello
+- **Badge e barre dei posti disponibili** in tempo reale sulle card eventi e in home (liberi / lista d'attesa / esauriti / concluso)
+- **Colore dell'area coerente** su pagine, badge, ricevute ed email, con testo a contrasto calcolato automaticamente
+- **Accessibilità**: struttura dei titoli, landmark, focus da tastiera visibile, contrasti verificati con axe-core
 - **Stampa lista iscritti** in vista ottimizzata per stampa/PDF con filtri attivi
 - **Ricerca testuale** iscritti per nome, cognome, email, codice prenotazione
 - **Audit log** di tutte le operazioni amministrative
@@ -109,6 +117,12 @@ location / {
 chmod 775 uploads/ cache/
 ```
 
+La cartella `cache/` deve essere scrivibile da PHP: oltre alla cache della configurazione contiene i marcatori degli aggiornamenti del database (vedi sotto).
+
+### Aggiornamenti del database
+
+Non servono script SQL manuali dopo un aggiornamento del codice. Al primo accesso la funzione `assicura_schema()` in `functions.php` crea le tabelle e le colonne mancanti e corregge i tipi di colonna dei database più vecchi, poi scrive un marcatore (es. `cache/schema_v7.ok`) e da quel momento non interroga più lo schema. Le pagine non modificano mai la struttura del database: ogni nuova colonna va aggiunta lì, cambiando il nome del marcatore.
+
 ### 6. Configura il SSO (opzionale)
 
 Se usi SimpleSAMLphp per l'autenticazione istituzionale, modifica le impostazioni in `saml_login.php` e `functions.php` puntando alla tua istanza SimpleSAML.
@@ -117,7 +131,7 @@ La funzione `sync_sso_user()` in `functions.php` gestisce automaticamente la map
 
 | Tipo utente | Attributo email cercato | Fallback |
 |---|---|---|
-| Studente | `mail` / OID `0.9.2342.19200300.100.1.3` | `CF@studenti.unical.it` |
+| Studente | `mail` / OID `0.9.2342.19200300.100.1.3` | nessuno (i nomi degli attributi ricevuti finiscono nel log) |
 | Dipendente | `mail` / OID `0.9.2342.19200300.100.1.3` | nessuno |
 | Esterno (CIE/SPID) | `mail` / OID `0.9.2342.19200300.100.1.3` | nessuno |
 
@@ -132,8 +146,11 @@ eventidibest-cms/
 ├── admin/              # Pannello di amministrazione
 │   ├── admin_header.php        # Autenticazione, RBAC, sidebar
 │   ├── dashboard.php           # Dashboard con KPI e grafici
-│   ├── eventi.php              # CRUD eventi e turni
-│   ├── iscritti.php            # Gestione prenotazioni (ricerca, presenza, attestati)
+│   ├── eventi.php              # CRUD eventi, turni e sezioni, duplicazione
+│   ├── iscritti.php            # Gestione prenotazioni (ricerca, presenza, azioni di massa)
+│   ├── scanner.php             # Scanner check-in integrato con contatore in tempo reale
+│   ├── impostazioni_area.php   # Colori, layout e regole di ogni area
+│   ├── testata.php             # Testata, carosello e widget della home
 │   ├── stampa_lista_iscritti.php # Vista stampabile/PDF lista iscritti
 │   ├── messaggi.php            # Sistema messaggistica admin<->utente
 │   ├── sondaggi.php            # Questionari: campi, logica condizionale, statistiche
@@ -142,16 +159,17 @@ eventidibest-cms/
 │   ├── audit_log.php           # Log attivita sistema
 │   └── ...
 ├── database/
-│   └── schema.sql          # Schema completo del database (18 tabelle)
+│   └── schema.sql          # Schema completo del database (21 tabelle)
 ├── uploads/            # File caricati (escluso da git)
 ├── cache/              # Cache runtime (escluso da git)
 ├── assets/             # Icone PWA
 ├── config.php          # Connessione DB, session, security headers, CSP
-├── functions.php       # Funzioni core (CSRF, rate limit, email, log)
+├── functions.php       # Funzioni core (CSRF, rate limit, email, log, aggiornamenti dello schema)
 ├── mailer.php          # Wrapper PHPMailer
 ├── install.php         # Installer guidato (da eliminare dopo l'uso)
-├── index.php           # Homepage pubblica
-├── checkin.php         # Check-in via QR (admin)
+├── index.php           # Homepage pubblica a widget
+├── master_template.php # Motore dei layout delle pagine area (le pagine area lo includono)
+├── checkin.php         # Esito del QR letto con la fotocamera del telefono (admin)
 ├── self_checkin.php    # Self check-in studente
 ├── area_personale.php  # Area utente loggato (prenotazioni, messaggi)
 ├── profilo.php         # Profilo utente: dati SSO e modifica email
@@ -163,14 +181,14 @@ eventidibest-cms/
 
 ## Schema Database
 
-Il database e` composto da **18 tabelle**:
+Il database e` composto da **21 tabelle**:
 
 | Tabella | Descrizione |
 |---|---|
 | `ruoli` | Ruoli utente (Admin, Gestore, Studente, Dipendente, Ospite) |
 | `utenti` | Profili utente sincronizzati da SSO |
 | `pagine_eventi` | Sezioni/aree del portale (Welcome Week, OpenLab, ...) |
-| `sottocategorie` | Sottocategorie eventi per area |
+| `sottocategorie` | Sezioni degli eventi per area (con opzione "affiancata in alto" nel layout Griglia) |
 | `eventi` | Singoli eventi con locandina e accesso per ruolo |
 | `turni` | Slot orari con posti, apertura/chiusura, lista attesa |
 | `prenotazioni` | Prenotazioni con QR code univoco e stato |
@@ -185,13 +203,19 @@ Il database e` composto da **18 tabelle**:
 | `menu_voci` | Voci del menu di navigazione principale |
 | `log_attivita` | Audit trail di tutte le operazioni admin |
 | `rate_limit_attempts` | Protezione anti-flood endpoint pubblici |
+| `slide_home` | Immagini del carosello della home |
+| `log_accessi` | Registro degli accessi SSO |
+| `log_email` | Registro degli invii email (accettate / rifiutate dal server SMTP) |
 
 ---
 
 ## Sicurezza
 
 - Tutti i parametri utente sono passati tramite **prepared statements** (MySQLi)
-- **CSRF token** su tutti i form
+- **CSRF token** su tutti i form e sulle richieste AJAX
+- **Controllo dei permessi per ogni azione**: un gestore agisce solo su eventi, turni e prenotazioni della propria area o dei propri eventi
+- Output HTML e dati passati a JavaScript sempre codificati; i codici QR letti dallo scanner non vengono mai aperti come link
+- Colori personalizzati validati prima di essere usati negli stili
 - **Rate limiting** sugli endpoint di prenotazione e sondaggio
 - **Content Security Policy** (CSP) configurata in `config.php`
 - **HTTP Security Headers**: HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy

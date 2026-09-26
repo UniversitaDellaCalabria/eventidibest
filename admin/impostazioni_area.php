@@ -13,10 +13,6 @@ function admin_redirect($url) {
     exit;
 }
 
-// Guard idempotente — aggiunge la colonna se non esiste ancora
-@$conn->query("ALTER TABLE pagine_eventi ADD COLUMN IF NOT EXISTS copertina_path VARCHAR(255) DEFAULT NULL");
-@$conn->query("ALTER TABLE pagine_eventi ADD COLUMN IF NOT EXISTS mostra_in_home TINYINT(1) NOT NULL DEFAULT 1");
-@$conn->query("ALTER TABLE pagine_eventi ADD COLUMN IF NOT EXISTS limite_iscrizioni VARCHAR(20) NOT NULL DEFAULT 'nessuno'");
 
 if (isset($_POST['save_pagina_config'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
@@ -28,6 +24,7 @@ if (isset($_POST['save_pagina_config'])) {
     $col_sec = $conn->real_escape_string($_POST['colore_secondario'] ?? '#0056b3');
     $larg_cont = $conn->real_escape_string($_POST['larghezza_contenitore'] ?? '85%');
     $tmpl = $conn->real_escape_string($_POST['layout_template'] ?? 'grid');
+    if (!in_array($tmpl, ['grid', 'list', 'advanced_list', 'calendar', 'timeline', 'agenda', 'gruppi'], true)) $tmpl = 'grid';
     $mostra_home = isset($_POST['mostra_in_home']) ? 1 : 0;
     $limite_isc = in_array($_POST['limite_iscrizioni'] ?? '', ['nessuno', 'un_evento', 'un_turno'], true) ? $_POST['limite_iscrizioni'] : 'nessuno';
     $num_col = isset($_POST['num_colonne']) ? (int)$_POST['num_colonne'] : 2;
@@ -155,6 +152,7 @@ if (isset($_POST['save_pagina_config'])) {
                         <option value="advanced_list" <?php echo ($page_cfg['layout_template'] ?? '') == 'advanced_list' ? 'selected' : ''; ?>>Elenco Avanzato con Ricerca Laterale</option>
                         <option value="calendar" <?php echo ($page_cfg['layout_template'] ?? '') == 'calendar' ? 'selected' : ''; ?>>Calendario Interattivo Mensile</option>
                         <option value="timeline" <?php echo ($page_cfg['layout_template'] ?? '') == 'timeline' ? 'selected' : ''; ?>>Timeline (Cronologia Verticale)</option>
+                        <option value="agenda" <?php echo ($page_cfg['layout_template'] ?? '') == 'agenda' ? 'selected' : ''; ?>>Agenda a schede per giorno (orari, posti e prenotazione)</option>
                         <option value="gruppi" <?php echo ($page_cfg['layout_template'] ?? '') == 'gruppi' ? 'selected' : ''; ?>>Gruppi / Corsi (con posti e iscrizione)</option>
                     </select>
                 </div>

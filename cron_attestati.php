@@ -29,17 +29,12 @@ if (!$lock_handle || !flock($lock_handle, LOCK_EX | LOCK_NB)) {
     die("PROCESSO IN ESECUZIONE: Lo script cron_attestati.php è già in esecuzione in un altro processo (avviato meno di 10 minuti fa). Se il problema persiste oltre 10 minuti, il lock verrà rilasciato automaticamente al prossimo tentativo.\n");
 }
 
-// AUTO-PATCH: Aggiungiamo la colonna se non esiste
-$check_col = $conn->query("SHOW COLUMNS FROM prenotazioni LIKE 'attestato_inviato'");
-if ($check_col && $check_col->num_rows == 0) {
-    $conn->query("ALTER TABLE prenotazioni ADD COLUMN attestato_inviato TINYINT(1) DEFAULT 0");
-}
 
 $now = date('Y-m-d H:i:s');
 $email_inviate = 0;
 
 // Cerchiamo chi deve ricevere l'email (Evento finito, Presente, Mai inviata prima)
-$sql = "SELECT p.id, p.nome, p.cognome, p.email, p.codice_prenotazione, 
+$sql = "SELECT p.id, p.turno_id, p.nome, p.cognome, p.email, p.codice_prenotazione, 
                t.data_turno, e.titolo 
         FROM prenotazioni p
         JOIN turni t ON p.turno_id = t.id
@@ -68,7 +63,7 @@ if ($res && $res->num_rows > 0) {
         $corpo .= "<p>In alternativa, puoi sempre recuperarlo accedendo alla tua <a href='$link_area'>Area Personale</a>.</p>";
         $corpo .= "<p>Cordiali saluti,<br>Il team Eventi DiBEST</p>";
         
-        inviaNotificaEmail($row['email'], $oggetto, $corpo, $conn);
+        inviaNotificaEmail($row['email'], $oggetto, $corpo, $conn, colore_area_turno($conn, $row['turno_id']));
         
         // FASE 1: Patch Iniezione SQL con casting a Intero
         $p_id = (int)$row['id'];

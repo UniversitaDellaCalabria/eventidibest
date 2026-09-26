@@ -9,13 +9,15 @@ error_reporting(E_ALL);
 
 require_once __DIR__ . '/middleware.php';
 
-// Creazione colonna se manca (guard idempotente)
-@$conn->query("ALTER TABLE prenotazioni ADD COLUMN IF NOT EXISTS presente INT DEFAULT 0 AFTER stato");
 
 // CONTROLLO ACCESSO (Solo Admin o Gestori)
 require_admin_or_gestore(); // helper definito in middleware.php
 
 $code = isset($_GET['code']) ? trim($_GET['code']) : '';
+
+// Senza codice (apertura diretta della pagina) si usa lo scanner integrato nell'admin.
+// Questa pagina resta solo come destinazione dei QR dei biglietti letti con la fotocamera del telefono.
+if ($code === '') { header("Location: admin/scanner.php"); exit; }
 $msg_esito = "";
 $esito_classe = "";
 
@@ -53,10 +55,10 @@ if (!empty($code)) {
 
         if (!$is_authorized) {
             $esito_classe = "alert-danger";
-            $msg_esito = "❌ <strong>ACCESSO NEGATO</strong><br>Non hai i permessi per gestire il check-in dell'evento: <br><em>{$p['evento_titolo']}</em>.";
+            $msg_esito = "❌ <strong>ACCESSO NEGATO</strong><br>Non hai i permessi per gestire il check-in dell'evento: <br><em>" . htmlspecialchars($p['evento_titolo']) . "</em>.";
         } elseif ($p['stato'] !== 'confermata') {
             $esito_classe = "alert-danger";
-            $msg_esito = "❌ <strong>INGRESSO NEGATO</strong><br>La prenotazione non è confermata (Stato: {$p['stato']}).";
+            $msg_esito = "❌ <strong>INGRESSO NEGATO</strong><br>La prenotazione non è confermata (Stato: " . htmlspecialchars((string)$p['stato']) . ").";
         } elseif ($p['presente'] == 1) {
             $esito_classe = "alert-warning";
             $msg_esito = "⚠️ <strong>GIÀ REGISTRATO</strong><br>Questo biglietto è già stato scansionato in precedenza.";
@@ -65,7 +67,7 @@ if (!empty($code)) {
             $conn->query("UPDATE prenotazioni SET presente = 1, data_presenza = NOW() WHERE id = " . $p['id']);
             invia_email_attestato_se_concluso($conn, $p['id']);
             $esito_classe = "alert-success";
-            $msg_esito = "✅ <strong>INGRESSO CONSENTITO</strong><br>Utente: <strong>{$p['nome']} {$p['cognome']}</strong><br>Evento: {$p['evento_titolo']}";
+            $msg_esito = "✅ <strong>INGRESSO CONSENTITO</strong><br>Utente: <strong>" . htmlspecialchars($p['nome'] . ' ' . $p['cognome']) . "</strong><br>Evento: " . htmlspecialchars($p['evento_titolo']);
         }
     } else {
         $esito_classe = "alert-danger";
@@ -93,7 +95,7 @@ if (!empty($code)) {
                 <div class="fs-5"><?php echo $msg_esito; ?></div>
             </div>
             <div class="text-center">
-                <a href="checkin.php" class="btn btn-primary btn-lg fw-bold px-5 py-3 shadow-sm rounded-pill w-100">
+                <a href="admin/scanner.php" class="btn btn-primary btn-lg fw-bold px-5 py-3 shadow-sm rounded-pill w-100">
                     <i class="fa fa-camera me-2"></i> Nuova Scansione
                 </a>
             </div>
@@ -109,9 +111,14 @@ if (!empty($code)) {
 
             <script>
                 function onScanSuccess(decodedText, decodedResult) {
+                    // Mai aprire il contenuto del QR (potrebbe essere un link qualsiasi o "javascript:"):
+                    // si estrae solo il codice prenotazione e si ricarica questa pagina con quel codice.
+                    var codice = '';
+                    try { codice = new URL(decodedText).searchParams.get('code') || ''; } catch (e) { codice = decodedText; }
+                    codice = (codice || '').trim();
+                    if (!/^[A-Za-z0-9-]{4,40}$/.test(codice)) { alert('QR non riconosciuto: non è un biglietto del portale.'); return; }
                     html5QrcodeScanner.clear(); // Ferma la fotocamera
-                    // Esegui il redirect automatico al link scansionato
-                    window.location.href = decodedText;
+                    window.location.href = 'checkin.php?code=' + encodeURIComponent(codice);
                 }
                 let html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: {width: 250, height: 250} }, false);
                 html5QrcodeScanner.render(onScanSuccess);

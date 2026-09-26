@@ -63,25 +63,22 @@ $conn->set_charset("utf8mb4");
 $offset = date('P');
 $conn->query("SET time_zone = '$offset'");
 
-// Migrazione automatica: converte stato da ENUM a VARCHAR se manca 'annullata'
-$_col_res = $conn->query("SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'prenotazioni' AND COLUMN_NAME = 'stato' LIMIT 1");
-if ($_col_res && $_col_row = $_col_res->fetch_assoc()) {
-    $_col_type = strtolower($_col_row['COLUMN_TYPE'] ?? '');
-    if (strpos($_col_type, 'enum') !== false && strpos($_col_type, 'annullata') === false) {
-        $conn->query("ALTER TABLE prenotazioni MODIFY COLUMN stato VARCHAR(50) DEFAULT 'confermata'");
-        error_log('[DB] Migrazione: colonna prenotazioni.stato convertita da ENUM a VARCHAR(50)');
-    }
-}
-unset($_col_res, $_col_row, $_col_type);
 
 // $for_update = true: da usare SOLO dentro una transazione già aperta (begin_transaction).
 // Blocca le righe di 'prenotazioni' di questo turno finché la transazione non fa commit/rollback,
 // così due prenotazioni concorrenti sullo stesso turno vengono serializzate invece di leggere
 // lo stesso conteggio "vecchio" in parallelo (prevenzione overbooking - Fase 2).
+//
+// Posti occupati = somma di num_posti delle prenotazioni che tengono un posto:
+// confermata, richiesta_conferma (posto offerto dalla lista d'attesa, 24h per confermare)
+// e da_approvare (occupa MOMENTANEAMENTE: se rifiutata il posto si libera).
+// Non occupano: in_attesa, annullata, rifiutata, scaduta. stato NULL = vecchie righe confermate.
 function getPostiOccupati($conn, $turno_id, $for_update = false) {
     $turno_id = (int)$turno_id;
     $lock_clause = $for_update ? ' FOR UPDATE' : '';
-    $res = $conn->query("SELECT COUNT(*) as totale FROM prenotazioni WHERE turno_id = $turno_id" . $lock_clause);
+    $res = $conn->query("SELECT COALESCE(SUM(num_posti), 0) as totale FROM prenotazioni
+                         WHERE turno_id = $turno_id
+                           AND IFNULL(stato, 'confermata') IN ('confermata', 'richiesta_conferma', 'da_approvare')" . $lock_clause);
     if ($res && $row = $res->fetch_assoc()) {
         return (int)$row['totale'];
     }

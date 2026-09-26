@@ -123,10 +123,107 @@ $url_suffix .= !empty($filtro_data_fine) ? "&f_data_fine=" . urlencode($filtro_d
 // ==============================================================================
 // BLOCCO AZIONI BACKEND (Eseguite solo se NON archiviato)
 // ==============================================================================
+// RBAC: prenotazione/turno dell'area corrente e di un evento visibile al gestore
+function pren_autorizzata($conn, int $pr_id, int $p_id, string $rbac): bool {
+    $r = $conn->query("SELECT 1 FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id
+                       WHERE pr.id = $pr_id AND e.pagina_id = $p_id $rbac LIMIT 1");
+    return $r && $r->num_rows > 0;
+}
+function turno_isc_autorizzato($conn, int $t_id, int $p_id, string $rbac): bool {
+    $r = $conn->query("SELECT 1 FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = $t_id AND e.pagina_id = $p_id $rbac LIMIT 1");
+    return $r && $r->num_rows > 0;
+}
+function nega_accesso_isc(): void { http_response_code(403); die("Accesso negato."); }
+
+// Email "posto confermato" con ricevuta (approvazione o promozione manuale)
+function email_conferma_da_admin($conn, array $p_data, string $motivo): void {
+    if (empty($p_data['email'])) return;
+    $link = url_base_sito() . "/stampa_ricevuta.php?code=" . urlencode($p_data['codice_prenotazione']);
+    $btn  = "<p style='margin-top:15px;'><a href='$link' target='_blank' style='background:#B80000; color:#ffffff; padding:10px 18px; text-decoration:none; border-radius:6px; font-weight:bold;'>📄 Scarica Ricevuta PDF</a></p>";
+    $testo = $motivo === 'promossa'
+        ? "Si è liberato un posto: la tua prenotazione in lista d'attesa per <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong> (" . htmlspecialchars(etichetta_turno($p_data)) . ") è stata <strong>CONFERMATA</strong>."
+        : "La tua richiesta per l'evento <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong> (" . htmlspecialchars(etichetta_turno($p_data)) . ") è stata <strong>APPROVATA</strong>!";
+    $oggetto = ($motivo === 'promossa' ? "Posto Confermato: " : "Prenotazione Approvata: ") . $p_data['evento_titolo'];
+    inviaNotificaEmail($p_data['email'], $oggetto, "<p>$testo</p>$btn", $conn, colore_area_turno($conn, $p_data['turno_id']));
+}
+
 if (!$is_archivio) {
+    // ==========================================================================
+    // AZIONI DI MASSA sulle prenotazioni selezionate
+    // ==========================================================================
+    if (isset($_POST['bulk_azione'])) {
+        csrf_verify($_POST['csrf_token'] ?? '');
+        $azione = (string)$_POST['bulk_azione'];
+        $ids = isset($_POST['bulk_ids']) && is_array($_POST['bulk_ids']) ? array_values(array_unique(array_map('intval', $_POST['bulk_ids']))) : [];
+        $etichette = ['presente' => 'segnate presenti', 'assente' => 'segnate assenti', 'approva' => 'approvate',
+                      'promuovi' => 'promosse dalla lista d\'attesa', 'annulla' => 'annullate'];
+        if (!isset($etichette[$azione]) || !$ids) {
+            flash_set("Seleziona almeno un iscritto e un'azione.", 'warning');
+            admin_redirect("iscritti.php?p_id=$filtro_p&f_turno=$filtro_turno&f_stato=$filtro_stato$url_suffix");
+        }
+
+        $fatte = 0; $saltate = 0; $oltre_capienza = 0; $turni_liberati = [];
+        foreach ($ids as $pr_id) {
+            if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac)) { $saltate++; continue; }
+            $p_data = get_prenotazione_con_turno_evento($conn, $pr_id);
+            $st = $p_data['stato'] ?? '';
+            $ok = false;
+            switch ($azione) {
+                case 'presente':
+                    if ($st === 'confermata') {
+                        $conn->query("UPDATE prenotazioni SET presente = 1, data_presenza = NOW() WHERE id = $pr_id AND presente = 0");
+                        if ($conn->affected_rows > 0) invia_email_attestato_se_concluso($conn, $pr_id);
+                        $ok = true;
+                    }
+                    break;
+                case 'assente':
+                    $conn->query("UPDATE prenotazioni SET presente = 0 WHERE id = $pr_id");
+                    $ok = true;
+                    break;
+                case 'approva':
+                case 'promuovi':
+                    $da = $azione === 'approva' ? 'da_approvare' : 'in_attesa';
+                    if ($st === $da) {
+                        $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = $pr_id AND stato = '$da'");
+                        if ($conn->affected_rows > 0) {
+                            decadi_attese_vincolate($conn, $pr_id);
+                            email_conferma_da_admin($conn, $p_data, $azione === 'approva' ? 'approvata' : 'promossa');
+                            $t_info = get_turno_admin($conn, (int)$p_data['turno_id']);
+                            if ($t_info && getPostiOccupati($conn, (int)$p_data['turno_id']) > (int)$t_info['max_posti']) $oltre_capienza++;
+                            $ok = true;
+                        }
+                    }
+                    break;
+                case 'annulla':
+                    if (in_array($st, ['confermata', 'in_attesa', 'da_approvare', 'richiesta_conferma'], true)) {
+                        $conn->query("UPDATE prenotazioni SET stato = 'annullata' WHERE id = $pr_id");
+                        if (!empty($p_data['email'])) {
+                            inviaNotificaEmail($p_data['email'], "Prenotazione Annullata: " . $p_data['evento_titolo'],
+                                "La tua prenotazione per <strong>" . htmlspecialchars($p_data['evento_titolo']) . "</strong> è stata annullata dall'amministrazione.",
+                                $conn, colore_area_turno($conn, $p_data['turno_id']));
+                        }
+                        if ($st !== 'in_attesa') $turni_liberati[(int)$p_data['turno_id']] = true;
+                        $ok = true;
+                    }
+                    break;
+            }
+            $ok ? $fatte++ : $saltate++;
+        }
+        // Posti liberati dagli annullamenti: una sola promozione per turno, a fine elaborazione
+        foreach (array_keys($turni_liberati) as $tid) promuovi_lista_attesa($conn, $tid);
+
+        if (function_exists('registra_log_audit')) registra_log_audit($conn, "Azione di massa iscritti", ["Azione" => $azione, "Eseguite" => $fatte, "Saltate" => $saltate]);
+        $msg = "$fatte prenotazioni " . $etichette[$azione] . ".";
+        if ($saltate > 0) $msg .= " $saltate saltate (stato non compatibile con l'azione o permessi mancanti).";
+        if ($oltre_capienza > 0) $msg .= " Attenzione: $oltre_capienza promozioni superano la capienza del turno.";
+        flash_set($msg, $saltate > 0 || $oltre_capienza > 0 ? 'warning' : 'success');
+        admin_redirect("iscritti.php?p_id=$filtro_p&f_turno=$filtro_turno&f_stato=$filtro_stato$url_suffix");
+    }
+
     if (isset($_POST['toggle_presenza'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['toggle_presenza']; $val = (int)$_POST['val'];
+        if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso_isc();
         $conn->query("UPDATE prenotazioni SET presente = $val WHERE id = $pr_id");
         if ($val === 1) invia_email_attestato_se_concluso($conn, $pr_id);
         if (function_exists('registra_log_audit')) registra_log_audit($conn, "Modifica Presenza Check-in", ["ID Prenotazione" => $pr_id]);
@@ -136,6 +233,7 @@ if (!$is_archivio) {
     if (isset($_POST['approva_pren'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['approva_pren'];
+        if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso_isc();
         $p_data = get_prenotazione_con_turno_evento($conn, $pr_id);
         if ($p_data) {
             $conn->query("UPDATE prenotazioni SET stato = 'confermata' WHERE id = $pr_id");
@@ -150,7 +248,7 @@ if (!$is_archivio) {
             
             $obj_tpl = "Prenotazione Approvata: " . $p_data['evento_titolo'];
             $body_tpl = "<p>La tua richiesta per l'evento <strong>{$p_data['evento_titolo']}</strong> è stata <strong>APPROVATA</strong>!</p>$btn_ricevuta_html";
-            inviaNotificaEmail($p_data['email'], $obj_tpl, $body_tpl, $conn);
+            inviaNotificaEmail($p_data['email'], $obj_tpl, $body_tpl, $conn, colore_area_turno($conn, $p_data['turno_id']));
         }
         flash_set("✅ Prenotazione approvata!");
         admin_redirect("iscritti.php?p_id=$filtro_p&f_turno=$filtro_turno&f_stato=$filtro_stato$url_suffix");
@@ -159,12 +257,17 @@ if (!$is_archivio) {
     if (isset($_POST['rifiuta_pren'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['rifiuta_pren'];
+        if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso_isc();
         $p_data = get_prenotazione_con_turno_evento($conn, $pr_id);
         if ($p_data) {
             $conn->query("UPDATE prenotazioni SET stato = 'rifiutata' WHERE id = $pr_id");
             $oggetto = "Aggiornamento Prenotazione: " . $p_data['evento_titolo'];
             $corpo = "<p>Siamo spiacenti di informarti che la tua richiesta per l'evento <strong>{$p_data['evento_titolo']}</strong> non è stata accolta.</p>";
-            inviaNotificaEmail($p_data['email'], $oggetto, $corpo, $conn);
+            inviaNotificaEmail($p_data['email'], $oggetto, $corpo, $conn, colore_area_turno($conn, $p_data['turno_id']));
+            // Il posto tenuto da una richiesta in approvazione si libera: offrilo alla lista d'attesa
+            if (in_array($p_data['stato'], ['da_approvare', 'confermata', 'richiesta_conferma'], true)) {
+                promuovi_lista_attesa($conn, (int)$p_data['turno_id']);
+            }
         }
         flash_set("❌ Prenotazione rifiutata.", 'danger');
         admin_redirect("iscritti.php?p_id=$filtro_p&f_turno=$filtro_turno&f_stato=$filtro_stato$url_suffix");
@@ -173,12 +276,13 @@ if (!$is_archivio) {
     if (isset($_POST['annulla_pren'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['annulla_pren'];
+        if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso_isc();
         $p_data = get_prenotazione_con_turno_evento($conn, $pr_id);
         if ($p_data) {
             $upd_ok = $conn->query("UPDATE prenotazioni SET stato = 'annullata' WHERE id = $pr_id");
             if ($upd_ok && $conn->affected_rows > 0) {
-                if (!empty($p_data['email'])) { inviaNotificaEmail($p_data['email'], "Prenotazione Annullata: " . $p_data['evento_titolo'], "La tua prenotazione è stata annullata dall'amministrazione.", $conn); }
-                if ($p_data['stato'] === 'confermata' || $p_data['stato'] === 'richiesta_conferma') { promuovi_lista_attesa($conn, $p_data['turno_id']); }
+                if (!empty($p_data['email'])) { inviaNotificaEmail($p_data['email'], "Prenotazione Annullata: " . $p_data['evento_titolo'], "La tua prenotazione è stata annullata dall'amministrazione.", $conn, colore_area_turno($conn, $p_data['turno_id'])); }
+                if (in_array($p_data['stato'], ['confermata', 'richiesta_conferma', 'da_approvare'], true)) { promuovi_lista_attesa($conn, $p_data['turno_id']); }
                 flash_set("🚫 Prenotazione annullata!");
                 admin_redirect("iscritti.php?p_id=$filtro_p&f_turno=$filtro_turno&f_stato=annullata$url_suffix");
             } else {
@@ -195,11 +299,12 @@ if (!$is_archivio) {
     if (isset($_POST['del_pren'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_del_id = (int)$_POST['del_pren'];
+        if (!pren_autorizzata($conn, $pr_del_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso_isc();
         $p_data = get_prenotazione_con_turno_evento($conn, $pr_del_id);
         if ($p_data) {
             $conn->query("DELETE FROM prenotazioni WHERE id = $pr_del_id");
-            if (!empty($p_data['email'])) { inviaNotificaEmail($p_data['email'], "Cancellazione Prenotazione", "La tua prenotazione per <strong>{$p_data['evento_titolo']}</strong> è stata cancellata.", $conn); }
-            if ($p_data['stato'] === 'confermata' || $p_data['stato'] === 'richiesta_conferma') { promuovi_lista_attesa($conn, $p_data['turno_id']); }
+            if (!empty($p_data['email'])) { inviaNotificaEmail($p_data['email'], "Cancellazione Prenotazione", "La tua prenotazione per <strong>{$p_data['evento_titolo']}</strong> è stata cancellata.", $conn, colore_area_turno($conn, $p_data['turno_id'])); }
+            if (in_array($p_data['stato'], ['confermata', 'richiesta_conferma', 'da_approvare'], true)) { promuovi_lista_attesa($conn, $p_data['turno_id']); }
         }
         flash_set("Prenotazione eliminata!");
         admin_redirect("iscritti.php?p_id=$filtro_p&f_turno=$filtro_turno&f_stato=$filtro_stato$url_suffix");
@@ -208,8 +313,10 @@ if (!$is_archivio) {
     if (isset($_POST['invia_messaggio_singolo'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['prenotazione_id'];
-        $email_dest = trim($_POST['email_destinatario']);
-        $ev_titolo = trim($_POST['evento_titolo']);
+        if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso_isc();
+        $p_msg = get_prenotazione_con_turno_evento($conn, $pr_id);
+        $email_dest = (string)($p_msg['email'] ?? ''); // dal DB: il campo del form non è affidabile
+        $ev_titolo = (string)($p_msg['evento_titolo'] ?? '');
         $messaggio_html = trim($_POST['corpo_messaggio']);
         $admin_id = $_SESSION['utente_id'] ?? 0;
 
@@ -253,6 +360,7 @@ if (!$is_archivio) {
     if (isset($_POST['add_prenotazione_manuale'])) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $turno_id = (int)$_POST['turno_id'];
+        if (!turno_isc_autorizzato($conn, $turno_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso_isc();
         $nome = trim($_POST['nome'] ?? '');
         $cognome = trim($_POST['cognome'] ?? '');
         $email = strtolower(trim($_POST['email'] ?? ''));
@@ -273,7 +381,7 @@ if (!$is_archivio) {
                         . "<p><strong>Codice prenotazione:</strong> <span style='font-family:monospace;font-size:1.2em;color:#B80000;'>$codice_p</span></p>"
                         . "<p>Conserva questo codice: ti servirà per il check-in il giorno dell'evento.</p>"
                         . "<p>Cordiali saluti,<br>Segreteria DiBEST</p>";
-                    inviaNotificaEmail($email, "Conferma Prenotazione: " . $t_info['evento_titolo'], $body_conf, $conn);
+                    inviaNotificaEmail($email, "Conferma Prenotazione: " . $t_info['evento_titolo'], $body_conf, $conn, colore_area_turno($conn, $turno_id));
                 }
             }
         }
@@ -284,6 +392,7 @@ if (!$is_archivio) {
         csrf_verify($_POST['csrf_token'] ?? '');
         $pr_id = (int)$_POST['prenotazione_id'];
         $nuovo_turno_id = (int)$_POST['nuovo_turno_id'];
+        if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac) || !turno_isc_autorizzato($conn, $nuovo_turno_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso_isc();
         $nome = trim($_POST['nome'] ?? '');
         $cognome = trim($_POST['cognome'] ?? '');
         $email = strtolower(trim($_POST['email'] ?? ''));
@@ -448,7 +557,7 @@ $col_area_i = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
             <a href="archivio.php?p_id=<?php echo $filtro_p; ?>" class="btn btn-outline-secondary btn-sm fw-bold" style="border-radius:8px;"><i class="fa fa-arrow-left me-1"></i>Archivio</a>
             <span class="badge p-2" style="background:#f1f5f9;color:#64748b;border-radius:8px;"><i class="fa fa-lock me-1"></i>Sola Lettura</span>
         <?php else: ?>
-            <a href="../checkin.php" target="_blank" class="btn btn-sm fw-bold text-white" style="background:<?php echo $col_area_i; ?>;border-radius:8px;border:none;"><i class="fa fa-qrcode me-1"></i>Scanner</a>
+            <a href="scanner.php?p_id=<?php echo $filtro_p; ?>" class="btn btn-sm fw-bold text-white" style="background:<?php echo $col_area_i; ?>;border-radius:8px;border:none;"><i class="fa fa-qrcode me-1"></i>Scanner</a>
             <a href="../cron_attestati.php" class="btn btn-sm btn-outline-success fw-bold" style="border-radius:8px;" data-confirm="Vuoi scansionare tutti gli eventi terminati e inviare le email agli studenti presenti?"><i class="fa fa-graduation-cap me-1"></i>Attestati</a>
             <button type="button" class="btn btn-sm fw-bold" style="border-radius:8px;background:#f1f5f9;border:1px solid #e2e8f0;color:#334155;" data-bs-toggle="modal" data-bs-target="#modMailMassiva"><i class="fa fa-paper-plane me-1"></i>Mail Massiva</button>
             <button type="button" class="btn btn-sm fw-bold text-white" style="background:<?php echo $col_area_i; ?>;border-radius:8px;border:none;" data-bs-toggle="modal" data-bs-target="#modPrenotazioneManuale"><i class="fa fa-user-plus me-1"></i>+ Manuale</button>
@@ -513,11 +622,65 @@ $col_area_i = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
         </form>
     </div>
 
+    <?php if (!$is_archivio): ?>
+    <!-- AZIONI DI MASSA: compare quando si seleziona almeno un iscritto -->
+    <form method="POST" id="bulkForm" class="d-none align-items-center flex-wrap gap-2 px-3 py-2 border-bottom" style="background:#fffbeb;position:sticky;top:0;z-index:5;">
+        <?php csrf_field(); ?>
+        <span class="fw-bold" style="font-size:.85rem;"><i class="fa fa-check-square me-1" aria-hidden="true"></i><span id="bulkCount">0</span> selezionati</span>
+        <label for="bulkAzione" class="visually-hidden">Azione da applicare</label>
+        <select name="bulk_azione" id="bulkAzione" class="form-select form-select-sm" style="max-width:260px;border-radius:8px;" required>
+            <option value="">Scegli un'azione…</option>
+            <option value="presente">Segna presenti</option>
+            <option value="assente">Segna assenti</option>
+            <option value="approva">Approva (richieste da approvare)</option>
+            <option value="promuovi">Promuovi dalla lista d'attesa</option>
+            <option value="annulla">Annulla prenotazioni</option>
+        </select>
+        <button type="submit" class="btn btn-sm fw-bold text-white" style="background:<?php echo $col_area_i; ?>;border-radius:8px;border:none;">Applica</button>
+        <button type="button" id="bulkDeseleziona" class="btn btn-sm btn-outline-secondary fw-bold" style="border-radius:8px;">Deseleziona</button>
+        <span class="text-muted small ms-auto">Le azioni si applicano solo agli iscritti con uno stato compatibile.</span>
+    </form>
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        var form = document.getElementById('bulkForm'), tutti = document.getElementById('selTutti');
+        var caselle = function () { return Array.prototype.slice.call(document.querySelectorAll('#tabellaIscritti .sel-pren')); };
+        function aggiorna() {
+            var n = caselle().filter(function (c) { return c.checked; }).length;
+            document.getElementById('bulkCount').textContent = n;
+            form.classList.toggle('d-none', n === 0);
+            form.classList.toggle('d-flex', n > 0);
+            var visibili = caselle().filter(function (c) { return c.offsetParent !== null; });
+            tutti.checked = visibili.length > 0 && visibili.every(function (c) { return c.checked; });
+        }
+        document.getElementById('tabellaIscritti').addEventListener('change', function (e) {
+            if (e.target.id === 'selTutti') {
+                // "Seleziona tutti" agisce solo sulle righe visibili (rispetta la ricerca della tabella)
+                caselle().forEach(function (c) { if (c.offsetParent !== null) c.checked = e.target.checked; });
+            }
+            if (e.target.id === 'selTutti' || e.target.classList.contains('sel-pren')) aggiorna();
+        });
+        document.getElementById('bulkDeseleziona').addEventListener('click', function () {
+            caselle().forEach(function (c) { c.checked = false; }); aggiorna();
+        });
+        form.addEventListener('submit', function (e) {
+            var scelte = caselle().filter(function (c) { return c.checked; });
+            var azione = document.getElementById('bulkAzione');
+            if (!confirm('Applicare "' + azione.options[azione.selectedIndex].text + '" a ' + scelte.length + ' iscritti?')) { e.preventDefault(); return; }
+            form.querySelectorAll('input[name="bulk_ids[]"]').forEach(function (i) { i.remove(); });
+            scelte.forEach(function (c) {
+                var h = document.createElement('input'); h.type = 'hidden'; h.name = 'bulk_ids[]'; h.value = c.value; form.appendChild(h);
+            });
+        });
+    });
+    </script>
+    <?php endif; ?>
+
     <!-- TABELLA -->
     <div class="table-responsive">
         <table id="tabellaIscritti" class="table isc-table align-middle mb-0">
             <thead>
                 <tr>
+                    <?php if (!$is_archivio): ?><th style="width:34px;"><input type="checkbox" class="form-check-input" id="selTutti" aria-label="Seleziona tutti gli iscritti visibili"></th><?php endif; ?>
                     <th>Partecipante</th>
                     <th>Evento / Turno</th>
                     <th>Stato</th>
@@ -552,6 +715,7 @@ $col_area_i = htmlspecialchars($page_cfg['colore_primario'] ?? '#0056b3');
                     $row_opacity = in_array($st_val, ['annullata','rifiutata']) ? 'opacity:0.6;' : '';
                 ?>
                 <tr style="<?php echo $row_opacity; ?>">
+                    <?php if (!$is_archivio): ?><td><input type="checkbox" class="form-check-input sel-pren" value="<?php echo (int)$pr['id']; ?>" aria-label="Seleziona <?php echo htmlspecialchars($pr['nome'] . ' ' . $pr['cognome']); ?>"></td><?php endif; ?>
                     <!-- Partecipante -->
                     <td>
                         <div class="d-flex align-items-center gap-2">
@@ -979,8 +1143,8 @@ document.addEventListener('DOMContentLoaded', function() {
         paging:  false,
         info:    false,
         language: { url: '//cdn.datatables.net/plug-ins/1.13.6/i18n/it-IT.json' },
-        order: [[4, "desc"]],
-        columnDefs: [ { orderable: false, targets: 5 } ]
+        order: [[<?php echo $is_archivio ? 4 : 5; ?>, "desc"]],
+        columnDefs: [ { orderable: false, targets: <?php echo $is_archivio ? "5" : "[0, 6]"; ?> } ]
     });
 
     // --- AUTOCOMPLETE UTENTE REGISTRATO nel modale prenotazione manuale ---

@@ -188,7 +188,7 @@ foreach ($stati_data as $sd) {
             <?php endif; ?>
         </a>
         <?php endif; ?>
-        <a href="../checkin.php" target="_blank" class="btn btn-sm fw-bold text-white" style="background:<?php echo $colore_area; ?>;border-radius:8px;border:none;">
+        <a href="scanner.php?p_id=<?php echo $filtro_p; ?>" class="btn btn-sm fw-bold text-white" style="background:<?php echo $colore_area; ?>;border-radius:8px;border:none;">
             <i class="fa fa-qrcode me-1"></i>Apri Scanner
         </a>
     </div>
@@ -338,7 +338,7 @@ $kpi_defs = [
                     ['href'=>'eventi.php?p_id='.$filtro_p,    'icon'=>'fa-calendar-alt',    'label'=>'Eventi',    'color'=>$colore_area],
                     ['href'=>'iscritti.php?p_id='.$filtro_p,  'icon'=>'fa-users',            'label'=>'Iscritti',  'color'=>'#0891b2'],
                     ['href'=>'messaggi.php?p_id='.$filtro_p,  'icon'=>'fa-envelope',         'label'=>'Messaggi',  'color'=>'#dc2626'],
-                    ['href'=>'../checkin.php',                 'icon'=>'fa-qrcode',           'label'=>'Scanner',   'color'=>'#16a34a', 'target'=>'_blank'],
+                    ['href'=>'scanner.php?p_id=' . $filtro_p, 'icon'=>'fa-qrcode',           'label'=>'Scanner',   'color'=>'#16a34a'],
                 ];
                 foreach ($links as $lk): ?>
                 <div class="col-6">

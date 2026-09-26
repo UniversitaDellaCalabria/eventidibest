@@ -130,7 +130,7 @@ if ('serviceWorker' in navigator) {
 </script>
 
 <!-- BANNER COOKIE NATIVO -->
-<div id="cookieBanner" style="display: none; position: fixed; bottom: 0; left: 0; width: 100%; background: #1e293b; color: white; padding: 15px 20px; z-index: 9999; box-shadow: 0 -4px 15px rgba(0,0,0,0.2);">
+<div id="cookieBanner" role="region" aria-label="Informativa cookie" style="display: none; position: fixed; bottom: 0; left: 0; width: 100%; background: #1e293b; color: white; padding: 15px 20px; z-index: 9999; box-shadow: 0 -4px 15px rgba(0,0,0,0.2);">
     <div class="container d-flex flex-column flex-md-row justify-content-between align-items-center gap-3">
         <div class="small" style="line-height: 1.4;">
             <i class="fa fa-cookie-bite text-warning me-2 fs-4 align-middle"></i>

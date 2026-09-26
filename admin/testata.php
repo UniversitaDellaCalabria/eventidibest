@@ -14,18 +14,6 @@ function admin_redirect($url) {
     exit;
 }
 
-// ── SLIDE HOME: crea tabella se non esiste ──────────────────────────────────
-@$conn->query("CREATE TABLE IF NOT EXISTS slide_home (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    immagine_path VARCHAR(255) NOT NULL,
-    titolo VARCHAR(255) DEFAULT '',
-    sottotitolo VARCHAR(255) DEFAULT '',
-    link VARCHAR(500) DEFAULT '',
-    ordine INT DEFAULT 0,
-    attiva TINYINT(1) DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_ordine (ordine)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
 // ── POST: salva configurazione widget ────────────────────────────────────────
 if (isset($_POST['save_widgets_home'])) {
@@ -36,7 +24,9 @@ if (isset($_POST['save_widgets_home'])) {
         'card_aree'       => isset($_POST['w_card_aree'])       ? 1 : 0,
         'annunci'         => isset($_POST['w_annunci'])         ? 1 : 0,
         'statistiche'     => isset($_POST['w_statistiche'])     ? 1 : 0,
-        'ordine'          => isset($_POST['ordine']) && is_array($_POST['ordine']) ? array_map('strval', $_POST['ordine']) : [],
+        'mia_prenotazione'=> isset($_POST['w_mia_prenotazione']) ? 1 : 0,
+        'ultimi_posti'    => isset($_POST['w_ultimi_posti'])    ? 1 : 0,
+        'ordine'         => isset($_POST['ordine']) && is_array($_POST['ordine']) ? array_map('strval', $_POST['ordine']) : [],
         'aree_colonne'    => (int)($_POST['aree_colonne'] ?? 2),
         'aree_max'        => (int)($_POST['aree_max'] ?? 0),
         'eventi_num'      => (int)($_POST['eventi_num'] ?? 8),
@@ -401,10 +391,12 @@ $widgets_cur = get_widgets_home($cfg_w);
         <div id="widgetSortList" class="d-flex flex-column gap-2">
             <?php
             $widget_defs = [
-                'slideshow'       => ['label' => 'Carosello Fotografico', 'desc' => 'Carousel di immagini. Gestisci le slide dalla sezione qui sopra.', 'icon' => 'fa-images', 'col' => 'success'],
-                'annunci'         => ['label' => 'Bacheca Annunci', 'desc' => 'Riquadro HTML libero: avvisi, comunicazioni, link importanti.', 'icon' => 'fa-bullhorn', 'col' => 'warning'],
-                'card_aree'       => ['label' => 'Card Aree di Lavoro', 'desc' => 'Le card principali con le aree di iscrizione. Nasconderle svuota la home.', 'icon' => 'fa-th-large', 'col' => 'dark'],
-                'prossimi_eventi' => ['label' => 'Prossimi Appuntamenti', 'desc' => 'Eventi futuri di tutte le aree, ordinati per data.', 'icon' => 'fa-calendar-day', 'col' => 'primary'],
+                'slideshow'        => ['label' => 'Carosello Fotografico', 'desc' => 'Carousel di immagini. Gestisci le slide dalla sezione qui sopra.', 'icon' => 'fa-images', 'col' => 'success'],
+                'mia_prenotazione' => ['label' => 'La mia prossima prenotazione', 'desc' => 'Solo per utenti loggati con prenotazioni attive: evento, conto alla rovescia, QR del biglietto.', 'icon' => 'fa-ticket', 'col' => 'danger'],
+                'annunci'          => ['label' => 'Bacheca Annunci', 'desc' => 'Riquadro HTML libero: avvisi, comunicazioni, link importanti.', 'icon' => 'fa-bullhorn', 'col' => 'warning'],
+                'card_aree'        => ['label' => 'Card Aree di Lavoro', 'desc' => 'Le card principali con le aree di iscrizione. Nasconderle svuota la home.', 'icon' => 'fa-th-large', 'col' => 'dark'],
+                'ultimi_posti'     => ['label' => 'Ultimi Posti', 'desc' => 'Fino a 4 eventi quasi pieni (≤10% posti liberi) o con iscrizioni che chiudono entro 48 ore.', 'icon' => 'fa-fire', 'col' => 'danger'],
+                'prossimi_eventi'  => ['label' => 'Prossimi Appuntamenti', 'desc' => 'Eventi futuri di tutte le aree, ordinati per data.', 'icon' => 'fa-calendar-day', 'col' => 'primary'],
                 'statistiche'     => ['label' => 'Numeri del Dipartimento', 'desc' => 'Contatori: eventi in programma, aree attive, iscrizioni confermate.', 'icon' => 'fa-chart-bar', 'col' => 'info'],
             ];
             foreach ($widgets_cur['ordine'] as $key):
