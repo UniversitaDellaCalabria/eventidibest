@@ -842,6 +842,26 @@ if (!function_exists('csrf_verify')) {
     }
 }
 
+if (!function_exists('consenti_esecuzione_cron')) {
+    // Gli script cron partono SOLO: da riga di comando (crontab con "php script.php"), con la chiave
+    // CRON_KEY del file .env (crontab con wget/curl: script.php?key=...), oppure da un utente loggato
+    // con uno dei ruoli ammessi (pulsanti del pannello admin). In tutti gli altri casi: 403.
+    function consenti_esecuzione_cron(array $ruoli_ammessi = [1]): void {
+        if (PHP_SAPI === 'cli') return;
+        $chiave = (string)($GLOBALS['_env']['CRON_KEY'] ?? '');
+        if (strlen($chiave) >= 16 && hash_equals($chiave, (string)($_GET['key'] ?? ''))) return;
+        if (session_status() === PHP_SESSION_NONE) @session_start();
+        if (!empty($_SESSION['utente_id'])) {
+            $ruoli = array_merge([(int)($_SESSION['utente_ruolo_id'] ?? 0)],
+                                 array_map('intval', explode(',', (string)($_SESSION['utente_ruoli_secondari'] ?? ''))));
+            if (array_intersect($ruoli, $ruoli_ammessi)) return;
+        }
+        error_log('[cron] accesso negato a ' . basename($_SERVER['SCRIPT_NAME'] ?? '?') . ' da ' . ($_SERVER['REMOTE_ADDR'] ?? '?'));
+        http_response_code(403);
+        exit("Accesso negato.\n");
+    }
+}
+
 if (!function_exists('secure_upload')) {
     function secure_upload(array $file, string $upload_dir, array $allowed_exts, array $allowed_mimes): ?string {
         if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) return null;
@@ -1658,6 +1678,156 @@ if (!function_exists('invalidate_configurazione_portale_cache')) {
     function invalidate_configurazione_portale_cache() {
         $cache_file = __DIR__ . '/cache/configurazione_portale.json';
         if (is_file($cache_file)) { @unlink($cache_file); }
+    }
+}
+
+// =======================================================================
+// EVENTI E TURNI: permessi, duplicazione, eliminazione (usate da admin/eventi.php e admin/archivio.php)
+// =======================================================================
+if (!function_exists('ev_autorizzato')) {
+    // Evento dell'area corrente e visibile al gestore ($sql_filtro_eventi_rbac di admin_header.php)
+    function ev_autorizzato($conn, int $ev_id, int $p_id, string $rbac): bool {
+        $r = $conn->query("SELECT 1 FROM eventi e WHERE e.id = $ev_id AND e.pagina_id = $p_id $rbac LIMIT 1");
+        return $r && $r->num_rows > 0;
+    }
+}
+if (!function_exists('turno_autorizzato')) {
+    function turno_autorizzato($conn, int $t_id, int $p_id, string $rbac): bool {
+        $r = $conn->query("SELECT 1 FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = $t_id AND e.pagina_id = $p_id $rbac LIMIT 1");
+        return $r && $r->num_rows > 0;
+    }
+}
+if (!function_exists('pren_autorizzata')) {
+    // Prenotazione di un evento dell'area corrente visibile al gestore
+    function pren_autorizzata($conn, int $pr_id, int $p_id, string $rbac): bool {
+        $r = $conn->query("SELECT 1 FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id
+                           WHERE pr.id = $pr_id AND e.pagina_id = $p_id $rbac LIMIT 1");
+        return $r && $r->num_rows > 0;
+    }
+}
+if (!function_exists('nega_accesso')) {
+    function nega_accesso(): void { http_response_code(403); die("Accesso negato."); }
+}
+
+if (!function_exists('colonne_copiabili')) {
+    // Colonne di una tabella (escluso id): la copia resta corretta anche se lo schema cambia
+    function colonne_copiabili($conn, string $tabella, array $escludi = []): array {
+        $cols = [];
+        $r = $conn->query("SHOW COLUMNS FROM `$tabella`");
+        if ($r) while ($c = $r->fetch_assoc()) if ($c['Field'] !== 'id' && !in_array($c['Field'], $escludi, true)) $cols[] = $c['Field'];
+        return $cols;
+    }
+}
+
+if (!function_exists('duplica_turno')) {
+    // Duplica un turno (stessi dati, nessuna prenotazione) nell'evento indicato. Ritorna il nuovo id.
+    function duplica_turno($conn, int $t_id, int $ev_dest, bool $segna_copia): int {
+        $cols = colonne_copiabili($conn, 'turni', ['evento_id', 'nome_turno']);
+        $lista = implode(', ', array_map(fn($c) => "`$c`", $cols));
+        $nome  = $segna_copia ? "IF(nome_turno IS NULL OR nome_turno = '', NULL, CONCAT(nome_turno, ' (copia)'))" : 'nome_turno';
+        if (!$conn->query("INSERT INTO turni (evento_id, nome_turno, $lista) SELECT $ev_dest, $nome, $lista FROM turni WHERE id = $t_id")) {
+            throw new RuntimeException($conn->error);
+        }
+        return (int)$conn->insert_id;
+    }
+}
+
+if (!function_exists('duplica_evento')) {
+    // Copia un evento (titolo "(copia)", non archiviato) con campi del form e sondaggi (non attivi,
+    // condizioni "mostra se" ricollegate alle domande nuove). $con_turni: copia anche i turni, senza iscritti.
+    // Ritorna ['evento' => id, 'turni' => n, 'sondaggi' => n]; in caso di errore annulla tutto e lancia l'eccezione.
+    function duplica_evento($conn, int $ev_id, bool $con_turni = true): array {
+        $conn->begin_transaction();
+        try {
+            $cols  = colonne_copiabili($conn, 'eventi', ['titolo', 'archiviato']);
+            $lista = implode(', ', array_map(fn($c) => "`$c`", $cols));
+            if (!$conn->query("INSERT INTO eventi (titolo, archiviato, $lista) SELECT CONCAT(titolo, ' (copia)'), 0, $lista FROM eventi WHERE id = $ev_id")) {
+                throw new RuntimeException($conn->error);
+            }
+            $nuovo_ev = (int)$conn->insert_id;
+            if ($nuovo_ev <= 0) throw new RuntimeException('Evento da duplicare non trovato');
+
+            $n_turni = 0;
+            if ($con_turni) {
+                $r_t = $conn->query("SELECT id FROM turni WHERE evento_id = $ev_id ORDER BY id");
+                while ($r_t && $t = $r_t->fetch_assoc()) { duplica_turno($conn, (int)$t['id'], $nuovo_ev, false); $n_turni++; }
+            }
+
+            $cols_cf  = colonne_copiabili($conn, 'campi_form', ['evento_id']);
+            $lista_cf = implode(', ', array_map(fn($c) => "`$c`", $cols_cf));
+            if (!$conn->query("INSERT INTO campi_form (evento_id, $lista_cf) SELECT $nuovo_ev, $lista_cf FROM campi_form WHERE evento_id = $ev_id")) {
+                throw new RuntimeException($conn->error);
+            }
+
+            $n_sond = 0;
+            $cols_s  = colonne_copiabili($conn, 'sondaggi', ['evento_id', 'attivo']);
+            $lista_s = implode(', ', array_map(fn($c) => "`$c`", $cols_s));
+            $cols_d  = colonne_copiabili($conn, 'sondaggi_domande', ['sondaggio_id']);
+            $lista_d = implode(', ', array_map(fn($c) => "`$c`", $cols_d));
+            $r_s = $conn->query("SELECT id FROM sondaggi WHERE evento_id = $ev_id ORDER BY id");
+            while ($r_s && $s = $r_s->fetch_assoc()) {
+                $vecchio_s = (int)$s['id'];
+                $sql_s = "INSERT INTO sondaggi (evento_id, attivo" . ($lista_s !== '' ? ", $lista_s" : '') . ") SELECT $nuovo_ev, 0" . ($lista_s !== '' ? ", $lista_s" : '') . " FROM sondaggi WHERE id = $vecchio_s";
+                if (!$conn->query($sql_s)) throw new RuntimeException($conn->error);
+                $nuovo_s = (int)$conn->insert_id;
+                $n_sond++;
+
+                $mappa_dom = [];
+                $r_d = $conn->query("SELECT id FROM sondaggi_domande WHERE sondaggio_id = $vecchio_s ORDER BY id");
+                while ($r_d && $d = $r_d->fetch_assoc()) {
+                    $vecchia_d = (int)$d['id'];
+                    if (!$conn->query("INSERT INTO sondaggi_domande (sondaggio_id, $lista_d) SELECT $nuovo_s, $lista_d FROM sondaggi_domande WHERE id = $vecchia_d")) {
+                        throw new RuntimeException($conn->error);
+                    }
+                    $mappa_dom[$vecchia_d] = (int)$conn->insert_id;
+                }
+                foreach ($mappa_dom as $nuova_d) {
+                    $r_c = $conn->query("SELECT condizione_json FROM sondaggi_domande WHERE id = $nuova_d");
+                    $cond = ($r_c && $rc = $r_c->fetch_assoc()) ? json_decode((string)$rc['condizione_json'], true) : null;
+                    if (!is_array($cond) || !isset($cond['se_id'])) continue;
+                    $cond['se_id'] = $mappa_dom[(int)$cond['se_id']] ?? 0;
+                    $nuovo_json = $cond['se_id'] > 0 ? "'" . $conn->real_escape_string(json_encode($cond)) . "'" : 'NULL';
+                    $conn->query("UPDATE sondaggi_domande SET condizione_json = $nuovo_json WHERE id = $nuova_d");
+                }
+            }
+            $conn->commit();
+            return ['evento' => $nuovo_ev, 'turni' => $n_turni, 'sondaggi' => $n_sond];
+        } catch (Throwable $e) {
+            $conn->rollback();
+            throw $e;
+        }
+    }
+}
+
+if (!function_exists('elimina_turno')) {
+    // Elimina un turno con le sue prenotazioni e i messaggi collegati. Da usare dentro una transazione se serve.
+    function elimina_turno($conn, int $t_id): void {
+        $conn->query("DELETE m FROM messaggi_prenotazioni m JOIN prenotazioni pr ON m.prenotazione_id = pr.id WHERE pr.turno_id = $t_id");
+        $conn->query("DELETE FROM prenotazioni WHERE turno_id = $t_id");
+        $conn->query("DELETE FROM turni WHERE id = $t_id");
+    }
+}
+
+if (!function_exists('elimina_evento')) {
+    // Elimina definitivamente un evento e TUTTO ciò che dipende da lui (turni, prenotazioni, messaggi,
+    // campi del form, sondaggi con domande e risposte), in un'unica transazione: niente dati orfani.
+    function elimina_evento($conn, int $ev_id): bool {
+        $conn->begin_transaction();
+        try {
+            $conn->query("DELETE r FROM sondaggi_risposte r JOIN sondaggi s ON r.sondaggio_id = s.id WHERE s.evento_id = $ev_id");
+            $conn->query("DELETE d FROM sondaggi_domande d JOIN sondaggi s ON d.sondaggio_id = s.id WHERE s.evento_id = $ev_id");
+            $conn->query("DELETE FROM sondaggi WHERE evento_id = $ev_id");
+            $r_t = $conn->query("SELECT id FROM turni WHERE evento_id = $ev_id");
+            while ($r_t && $t = $r_t->fetch_assoc()) elimina_turno($conn, (int)$t['id']);
+            $conn->query("DELETE FROM campi_form WHERE evento_id = $ev_id");
+            if (!$conn->query("DELETE FROM eventi WHERE id = $ev_id")) throw new RuntimeException($conn->error);
+            $conn->commit();
+            return true;
+        } catch (Throwable $e) {
+            $conn->rollback();
+            error_log('[elimina_evento] ' . $e->getMessage());
+            return false;
+        }
     }
 }
 

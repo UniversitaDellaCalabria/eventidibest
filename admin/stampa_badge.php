@@ -34,6 +34,7 @@ $col_primaria = $page_cfg['colore_primario'] ?? '#990000';
 
 if (isset($_POST['avvia_stampa'])) {
     $t_id = (int)$_POST['turno_id'];
+    if (!turno_autorizzato($conn, $t_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso(); // solo turni dell'area/eventi del gestore
     
     // Info Base Turno e Logo
     $sql_info = "SELECT t.data_turno, e.titolo, e.luogo, e.id as ev_id, c.logo_path 

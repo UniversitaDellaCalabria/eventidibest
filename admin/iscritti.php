@@ -124,11 +124,6 @@ $url_suffix .= !empty($filtro_data_fine) ? "&f_data_fine=" . urlencode($filtro_d
 // BLOCCO AZIONI BACKEND (Eseguite solo se NON archiviato)
 // ==============================================================================
 // RBAC: prenotazione/turno dell'area corrente e di un evento visibile al gestore
-function pren_autorizzata($conn, int $pr_id, int $p_id, string $rbac): bool {
-    $r = $conn->query("SELECT 1 FROM prenotazioni pr JOIN turni t ON pr.turno_id = t.id JOIN eventi e ON t.evento_id = e.id
-                       WHERE pr.id = $pr_id AND e.pagina_id = $p_id $rbac LIMIT 1");
-    return $r && $r->num_rows > 0;
-}
 function turno_isc_autorizzato($conn, int $t_id, int $p_id, string $rbac): bool {
     $r = $conn->query("SELECT 1 FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = $t_id AND e.pagina_id = $p_id $rbac LIMIT 1");
     return $r && $r->num_rows > 0;

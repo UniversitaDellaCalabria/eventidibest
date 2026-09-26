@@ -45,33 +45,6 @@ function inserisci_turno($conn, int $ev_id, array $t): void {
     $stmt->execute();
 }
 
-// RBAC: evento/turno toccabili solo se dell'area corrente e visibili al gestore ($sql_filtro_eventi_rbac)
-function ev_autorizzato($conn, int $ev_id, int $p_id, string $rbac): bool {
-    $r = $conn->query("SELECT 1 FROM eventi e WHERE e.id = $ev_id AND e.pagina_id = $p_id $rbac LIMIT 1");
-    return $r && $r->num_rows > 0;
-}
-function turno_autorizzato($conn, int $t_id, int $p_id, string $rbac): bool {
-    $r = $conn->query("SELECT 1 FROM turni t JOIN eventi e ON t.evento_id = e.id WHERE t.id = $t_id AND e.pagina_id = $p_id $rbac LIMIT 1");
-    return $r && $r->num_rows > 0;
-}
-function nega_accesso(): void { http_response_code(403); die("Accesso negato."); }
-
-// Colonne di una tabella (escluso id): la copia resta corretta anche se lo schema cambia
-function colonne_copiabili($conn, string $tabella, array $escludi = []): array {
-    $cols = [];
-    $r = $conn->query("SHOW COLUMNS FROM `$tabella`");
-    if ($r) while ($c = $r->fetch_assoc()) if ($c['Field'] !== 'id' && !in_array($c['Field'], $escludi, true)) $cols[] = $c['Field'];
-    return $cols;
-}
-
-// Duplica un turno (stessi dati, nessuna prenotazione) nell'evento indicato. Ritorna il nuovo id.
-function duplica_turno($conn, int $t_id, int $ev_dest, bool $segna_copia): int {
-    $cols = colonne_copiabili($conn, 'turni', ['evento_id', 'nome_turno']);
-    $lista = implode(', ', array_map(fn($c) => "`$c`", $cols));
-    $nome  = $segna_copia ? "IF(nome_turno IS NULL OR nome_turno = '', NULL, CONCAT(nome_turno, ' (copia)'))" : 'nome_turno';
-    $conn->query("INSERT INTO turni (evento_id, nome_turno, $lista) SELECT $ev_dest, $nome, $lista FROM turni WHERE id = $t_id");
-    return (int)$conn->insert_id;
-}
 
 if (isset($_POST['duplica_turno'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
@@ -89,64 +62,14 @@ if (isset($_POST['duplica_evento'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $ev_id = (int)$_POST['duplica_evento'];
     if (!ev_autorizzato($conn, $ev_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
-    $conn->begin_transaction();
     try {
-        // Evento: tutte le colonne, titolo "(copia)", non archiviato
-        $cols  = colonne_copiabili($conn, 'eventi', ['titolo', 'archiviato']);
-        $lista = implode(', ', array_map(fn($c) => "`$c`", $cols));
-        if (!$conn->query("INSERT INTO eventi (titolo, archiviato, $lista) SELECT CONCAT(titolo, ' (copia)'), 0, $lista FROM eventi WHERE id = $ev_id")) {
-            throw new RuntimeException($conn->error);
-        }
-        $nuovo_ev = (int)$conn->insert_id;
-        // Turni (senza prenotazioni)
-        $n_turni = 0;
-        $r_t = $conn->query("SELECT id FROM turni WHERE evento_id = $ev_id ORDER BY id");
-        while ($r_t && $t = $r_t->fetch_assoc()) { duplica_turno($conn, (int)$t['id'], $nuovo_ev, false); $n_turni++; }
-        // Campi del form specifici dell'evento
-        $cols_cf  = colonne_copiabili($conn, 'campi_form', ['evento_id']);
-        $lista_cf = implode(', ', array_map(fn($c) => "`$c`", $cols_cf));
-        $conn->query("INSERT INTO campi_form (evento_id, $lista_cf) SELECT $nuovo_ev, $lista_cf FROM campi_form WHERE evento_id = $ev_id");
-
-        // Sondaggi con le domande (senza risposte). La copia parte NON attiva: si attiva quando serve.
-        // Le condizioni "mostra se" vengono ricollegate alle domande nuove.
-        $n_sond = 0;
-        $cols_s  = colonne_copiabili($conn, 'sondaggi', ['evento_id', 'attivo']);
-        $lista_s = implode(', ', array_map(fn($c) => "`$c`", $cols_s));
-        $cols_d  = colonne_copiabili($conn, 'sondaggi_domande', ['sondaggio_id']);
-        $lista_d = implode(', ', array_map(fn($c) => "`$c`", $cols_d));
-        $r_s = $conn->query("SELECT id FROM sondaggi WHERE evento_id = $ev_id ORDER BY id");
-        while ($r_s && $s = $r_s->fetch_assoc()) {
-            $vecchio_s = (int)$s['id'];
-            $sql_s = "INSERT INTO sondaggi (evento_id, attivo" . ($lista_s !== '' ? ", $lista_s" : '') . ") SELECT $nuovo_ev, 0" . ($lista_s !== '' ? ", $lista_s" : '') . " FROM sondaggi WHERE id = $vecchio_s";
-            if (!$conn->query($sql_s)) throw new RuntimeException($conn->error);
-            $nuovo_s = (int)$conn->insert_id;
-            $n_sond++;
-
-            $mappa_dom = [];
-            $r_d = $conn->query("SELECT id FROM sondaggi_domande WHERE sondaggio_id = $vecchio_s ORDER BY id");
-            while ($r_d && $d = $r_d->fetch_assoc()) {
-                $vecchia_d = (int)$d['id'];
-                if (!$conn->query("INSERT INTO sondaggi_domande (sondaggio_id, $lista_d) SELECT $nuovo_s, $lista_d FROM sondaggi_domande WHERE id = $vecchia_d")) {
-                    throw new RuntimeException($conn->error);
-                }
-                $mappa_dom[$vecchia_d] = (int)$conn->insert_id;
-            }
-            foreach ($mappa_dom as $nuova_d) {
-                $r_c = $conn->query("SELECT condizione_json FROM sondaggi_domande WHERE id = $nuova_d");
-                $cond = ($r_c && $rc = $r_c->fetch_assoc()) ? json_decode((string)$rc['condizione_json'], true) : null;
-                if (!is_array($cond) || !isset($cond['se_id'])) continue;
-                $cond['se_id'] = $mappa_dom[(int)$cond['se_id']] ?? 0;
-                $nuovo_json = $cond['se_id'] > 0 ? "'" . $conn->real_escape_string(json_encode($cond)) . "'" : 'NULL';
-                $conn->query("UPDATE sondaggi_domande SET condizione_json = $nuovo_json WHERE id = $nuova_d");
-            }
-        }
-        $conn->commit();
+        $copia = duplica_evento($conn, $ev_id, true);
     } catch (Throwable $e) {
-        $conn->rollback();
         error_log('[duplica_evento] ' . $e->getMessage());
         flash_set("Duplicazione non riuscita: " . htmlspecialchars($e->getMessage()), 'danger');
         admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
     }
+    [$nuovo_ev, $n_turni, $n_sond] = [$copia['evento'], $copia['turni'], $copia['sondaggi']];
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Duplicazione Evento", ["Evento origine" => $ev_id, "Nuovo evento" => $nuovo_ev, "Turni" => $n_turni, "Sondaggi" => $n_sond]);
     flash_set("Evento duplicato con $n_turni turni" . ($n_sond ? " e $n_sond sondaggio" . ($n_sond > 1 ? "i" : "") . " (da attivare)" : "") . ", senza iscritti: controlla titolo e date della copia.");
     admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev&apri=modEv$nuovo_ev");
@@ -359,22 +282,16 @@ if (isset($_POST['del_ev'])) {
     if (!ev_autorizzato($conn, $ev_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
     $res_ev_info = $conn->query("SELECT titolo FROM eventi WHERE id = $ev_id");
     $ev_titolo_log = ($res_ev_info && $r_log = $res_ev_info->fetch_assoc()) ? $r_log['titolo'] : '';
-    $res_t_del = $conn->query("SELECT id FROM turni WHERE evento_id = $ev_id");
-    while($t_del = $res_t_del->fetch_assoc()){ $conn->query("DELETE FROM prenotazioni WHERE turno_id = {$t_del['id']}"); }
-    $conn->query("DELETE FROM turni WHERE evento_id = $ev_id");
-    $conn->query("DELETE FROM campi_form WHERE evento_id = $ev_id");
-    $conn->query("DELETE FROM sondaggi WHERE evento_id = $ev_id");
-    $conn->query("DELETE FROM eventi WHERE id = $ev_id");
+    $ok_del = elimina_evento($conn, $ev_id); // turni, prenotazioni, messaggi, campi form, sondaggi con domande e risposte
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Eliminazione Evento", ["Evento ID" => $ev_id, "Titolo" => $ev_titolo_log]);
-    flash_set("Evento eliminato!");
+    flash_set($ok_del ? "Evento eliminato!" : "Eliminazione non riuscita: riprova.", $ok_del ? 'success' : 'danger');
     admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");
 }
 if (isset($_POST['del_turno'])) {
     csrf_verify($_POST['csrf_token'] ?? '');
     $t_id = (int)$_POST['del_turno'];
     if (!turno_autorizzato($conn, $t_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
-    $conn->query("DELETE FROM prenotazioni WHERE turno_id = $t_id");
-    $conn->query("DELETE FROM turni WHERE id = $t_id");
+    elimina_turno($conn, $t_id); // prenotazioni e messaggi collegati compresi
     if (function_exists('registra_log_audit')) registra_log_audit($conn, "Eliminazione Turno", ["Turno ID" => $t_id]);
     flash_set("Turno eliminato!");
     admin_redirect("eventi.php?p_id=$filtro_p&f_ev=$filtro_ev");

@@ -16,9 +16,12 @@ function admin_redirect($url) {
 
 // 1. INVIO RISPOSTA DALLA INBOX E MARCATURA COME LETTO
 if (isset($_POST['invia_risposta_inbox'])) {
+    csrf_verify($_POST['csrf_token'] ?? '');
     $pr_id = (int)$_POST['prenotazione_id'];
-    $email_dest = trim($_POST['email_destinatario']);
-    $ev_titolo = trim($_POST['evento_titolo']);
+    if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
+    $p_msg = get_prenotazione_con_turno_evento($conn, $pr_id); // destinatario e titolo dal DB, non dal form
+    $email_dest = (string)($p_msg['email'] ?? '');
+    $ev_titolo = (string)($p_msg['evento_titolo'] ?? '');
     $messaggio_raw = trim($_POST['corpo_messaggio']);
     $admin_id = $_SESSION['utente_id'] ?? 0;
 
@@ -37,7 +40,7 @@ if (isset($_POST['invia_risposta_inbox'])) {
 
         // Notifica Email
         if (!empty($email_dest)) {
-            $url_area = "https://dibest2.unical.it/eventi/area_personale.php";
+            $url_area = url_base_sito() . "/area_personale.php";
 
             $nome_operatore = 'Segreteria DiBEST';
             $stmt_op = $conn->prepare("SELECT nome, cognome FROM utenti WHERE id = ? LIMIT 1");
@@ -64,7 +67,7 @@ if (isset($_POST['invia_risposta_inbox'])) {
                     </a>
                 </p>
                 <p style='color:#6c757d; font-size:0.9em;'>Cordiali saluti,<br>" . htmlspecialchars($nome_operatore) . "<br>Segreteria DiBEST</p>";
-            inviaNotificaEmail($email_dest, $oggetto, $body_mail, $conn);
+            inviaNotificaEmail($email_dest, $oggetto, $body_mail, $conn, colore_area_turno($conn, (int)($p_msg['turno_id'] ?? 0)));
         }
         flash_set("✅ Risposta inviata con successo.");
     }
@@ -75,12 +78,13 @@ if (isset($_POST['invia_risposta_inbox'])) {
 // 2. AZIONE RAPIDA: SEGNA COME LETTO SENZA RISPONDERE
 if (isset($_GET['segna_letto'])) {
     $pr_id = (int)$_GET['segna_letto'];
+    if (!pren_autorizzata($conn, $pr_id, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
     $conn->query("UPDATE messaggi_prenotazioni SET letto = 1 WHERE prenotazione_id = $pr_id AND mittente_tipo = 'utente'");
     admin_redirect("messaggi.php?p_id=$filtro_p");
 }
 
 // 3. ESTRAZIONE DI TUTTE LE CONVERSAZIONI (Filtrate per Area e Permessi)
-$pr_filter_sql = (!$is_full_admin && !$can_manage_iscritti) ? " AND FIND_IN_SET($u_id_curr, e.gestori_utenti_ids) > 0 " : "";
+$pr_filter_sql = $sql_filtro_eventi_rbac; // i gestori di singolo evento vedono solo le conversazioni dei propri eventi
 $conversazioni = get_inbox_conversazioni($conn, $filtro_p, $pr_filter_sql);
 ?>
 
@@ -182,8 +186,7 @@ $conversazioni = get_inbox_conversazioni($conn, $filtro_p, $pr_filter_sql);
                                             
                                             <form method="POST" class="border-top p-3 bg-white">
                                                 <input type="hidden" name="prenotazione_id" value="<?php echo $conv['prenotazione_id']; ?>">
-                                                <input type="hidden" name="email_destinatario" value="<?php echo htmlspecialchars($conv['email']); ?>">
-                                                <input type="hidden" name="evento_titolo" value="<?php echo htmlspecialchars($conv['evento_titolo']); ?>">
+                                                <?php csrf_field(); ?>
                                                 <input type="hidden" name="p_id" value="<?php echo $filtro_p; ?>">
                                                 
                                                 <label class="form-label small fw-bold text-dark">Invia Risposta all'Utente</label>

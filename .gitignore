@@ -2,9 +2,10 @@
 .env
 
 # Cache runtime (file generati automaticamente)
-cache/*.json
-cache/*.lock
-cache/*.ok
+# Tutto il contenuto di cache/ tranne i file che servono alla cartella stessa
+cache/*
+!cache/.gitkeep
+!cache/.htaccess
 
 # Uploads utenti (non versionare file caricati)
 uploads/*

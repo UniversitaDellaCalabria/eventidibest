@@ -3,6 +3,7 @@
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once 'config.php';
 require_once 'functions.php';
+consenti_esecuzione_cron([1, 2]); // anche i gestori: pulsante "Attestati" in Iscritti
 
 // FASE 3: MUTEX LOCK PER PREVENIRE ESECUZIONI SOVRAPPOSTE E INVIO DOPPIO
 $cache_dir = __DIR__ . '/cache';

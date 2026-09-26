@@ -6,7 +6,9 @@ set_time_limit(0);
 ini_set('memory_limit', '512M');
 
 // Includiamo la connessione per il database
-require_once '../config.php';
+require_once __DIR__ . '/../config.php';
+require_once __DIR__ . '/../functions.php';
+consenti_esecuzione_cron([1]); // solo crontab, chiave CRON_KEY o admin (pulsante Backup in Testata)
 
 // --- CONFIGURAZIONE CARTELLA ---
 $backup_dir = __DIR__ . '/../backups/';

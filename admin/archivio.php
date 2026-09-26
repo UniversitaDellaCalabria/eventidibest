@@ -10,77 +10,49 @@ if (!$can_manage_eventi) {
 
 function admin_redirect($url) { echo "<script>window.location.replace('$url');</script>"; exit; }
 
+// Tutte le azioni sono POST con token CSRF e valgono solo per eventi dell'area corrente visibili al gestore
+$ev_azione = (int)($_POST['evento_id'] ?? 0);
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['ripristina_ev']) || isset($_POST['del_ev']) || isset($_POST['duplica_ev']) || isset($_POST['export_csv_archivio']))) {
+    csrf_verify($_POST['csrf_token'] ?? '');
+    if (!ev_autorizzato($conn, $ev_azione, $filtro_p, $sql_filtro_eventi_rbac)) nega_accesso();
+}
+
 // 1. AZIONE: RIPRISTINA EVENTO
-if (isset($_GET['ripristina_ev'])) {
-    $ev_id = (int)$_GET['ripristina_ev'];
-    // blocca_auto_archivio = 1: evita che l'auto-archiviazione silenziosa in config.php
-    // rimetta subito l'evento in archivio, dato che i suoi turni sono ancora nel passato.
-    $conn->query("UPDATE eventi SET archiviato = 0, blocca_auto_archivio = 1 WHERE id = $ev_id");
-    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Ripristino Evento da Archivio", ["Evento ID" => $ev_id]);
+if (isset($_POST['ripristina_ev'])) {
+    // blocca_auto_archivio = 1: evita che l'auto-archiviazione rimetta subito l'evento in archivio,
+    // dato che i suoi turni sono ancora nel passato.
+    $conn->query("UPDATE eventi SET archiviato = 0, blocca_auto_archivio = 1 WHERE id = $ev_azione");
+    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Ripristino Evento da Archivio", ["Evento ID" => $ev_azione]);
     flash_set("Evento ripristinato con successo! È tornato tra gli eventi attivi. Ricorda di aggiungere nuovi turni con date future, altrimenti resterà visibile ma senza date prenotabili.");
     admin_redirect("archivio.php?p_id=$filtro_p");
 }
 
-// 2. AZIONE: ELIMINA DEFINITIVAMENTE
-if (isset($_GET['del_ev'])) { 
-    $ev_id = (int)$_GET['del_ev'];
-    $res_t_del = $conn->query("SELECT id FROM turni WHERE evento_id = $ev_id");
-    while($t_del = $res_t_del->fetch_assoc()){ $conn->query("DELETE FROM prenotazioni WHERE turno_id = {$t_del['id']}"); }
-    $conn->query("DELETE FROM turni WHERE evento_id = $ev_id");
-    $conn->query("DELETE FROM campi_form WHERE evento_id = $ev_id");
-    $conn->query("DELETE FROM sondaggi WHERE evento_id = $ev_id"); 
-    $conn->query("DELETE FROM eventi WHERE id = $ev_id"); 
-    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Eliminazione Evento Archiviato", ["Evento ID" => $ev_id]);
-    flash_set("Evento eliminato definitivamente dal database.");
+// 2. AZIONE: ELIMINA DEFINITIVAMENTE (solo chi gestisce le impostazioni dell'area, come il pulsante)
+if (isset($_POST['del_ev'])) {
+    if (!$can_manage_settings) nega_accesso();
+    $ok_del = elimina_evento($conn, $ev_azione); // turni, prenotazioni, messaggi, campi form, sondaggi con domande e risposte
+    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Eliminazione Evento Archiviato", ["Evento ID" => $ev_azione]);
+    flash_set($ok_del ? "Evento eliminato definitivamente dal database." : "Eliminazione non riuscita: riprova.", $ok_del ? 'success' : 'danger');
     admin_redirect("archivio.php?p_id=$filtro_p");
 }
 
-// 3. AZIONE: DUPLICA EVENTO
-if (isset($_GET['duplica_ev'])) {
-    $ev_id = (int)$_GET['duplica_ev'];
-    
-    $res_ev = $conn->query("SELECT * FROM eventi WHERE id = $ev_id");
-    if ($res_ev && $ev_old = $res_ev->fetch_assoc()) {
-        $titolo_nuovo = $conn->real_escape_string($ev_old['titolo'] . " (Copia)");
-        $desc = $conn->real_escape_string($ev_old['descrizione']);
-        $loc = $conn->real_escape_string($ev_old['locandina_path']);
-        $pdf = $conn->real_escape_string($ev_old['allegato_pdf']);
-        $info = $conn->real_escape_string($ev_old['info_aggiuntive']);
-        $luogo = $conn->real_escape_string($ev_old['luogo']);
-        $cat = (int)$ev_old['sottocategoria_id'];
-        $ord = (int)$ev_old['ordine'];
-        $gest = $conn->real_escape_string($ev_old['gestori_utenti_ids']);
-        $perm = $conn->real_escape_string($ev_old['permessi_gestori_json']);
-        
-        $conn->query("INSERT INTO eventi (pagina_id, sottocategoria_id, titolo, descrizione, luogo, locandina_path, allegato_pdf, info_aggiuntive, ordine, gestori_utenti_ids, permessi_gestori_json, archiviato) 
-                      VALUES ($filtro_p, $cat, '$titolo_nuovo', '$desc', '$luogo', '$loc', '$pdf', '$info', $ord, '$gest', '$perm', 0)");
-        
-        $new_ev_id = $conn->insert_id;
-        
-        $res_cf = $conn->query("SELECT * FROM campi_form WHERE evento_id = $ev_id");
-        if ($res_cf) {
-            while ($cf = $res_cf->fetch_assoc()) {
-                $nc = $conn->real_escape_string($cf['nome_campo']);
-                $et = $conn->real_escape_string($cf['etichetta']);
-                $tp = $conn->real_escape_string($cf['tipo']);
-                $op = $conn->real_escape_string($cf['opzioni']);
-                $ob = (int)$cf['obbligatorio'];
-                $or = (int)$cf['ordine'];
-                $conn->query("INSERT INTO campi_form (pagina_id, evento_id, nome_campo, etichetta, tipo, opzioni, obbligatorio, ordine) 
-                              VALUES ($filtro_p, $new_ev_id, '$nc', '$et', '$tp', '$op', $ob, $or)");
-            }
-        }
-        
-        if (function_exists('registra_log_audit')) registra_log_audit($conn, "Clonazione Evento da Archivio", ["Da ID" => $ev_id, "Nuovo ID" => $new_ev_id]);
-        flash_set("Evento duplicato! Trovi la copia pronta nella sezione 'Eventi e Turni' per inserire le nuove date.");
-        
-        admin_redirect("eventi.php?p_id=$filtro_p");
+// 3. AZIONE: DUPLICA EVENTO (senza i vecchi turni: le date si inseriscono nella copia)
+if (isset($_POST['duplica_ev'])) {
+    try {
+        $copia = duplica_evento($conn, $ev_azione, false);
+    } catch (Throwable $e) {
+        error_log('[archivio duplica_ev] ' . $e->getMessage());
+        flash_set("Duplicazione non riuscita: " . htmlspecialchars($e->getMessage()), 'danger');
+        admin_redirect("archivio.php?p_id=$filtro_p");
     }
+    if (function_exists('registra_log_audit')) registra_log_audit($conn, "Clonazione Evento da Archivio", ["Da ID" => $ev_azione, "Nuovo ID" => $copia['evento'], "Sondaggi" => $copia['sondaggi']]);
+    flash_set("Evento duplicato! La copia è tra gli eventi attivi: aggiungi i turni con le nuove date." . ($copia['sondaggi'] ? " Il sondaggio è stato copiato non attivo." : ""));
+    admin_redirect("eventi.php?p_id=$filtro_p&apri=modEv" . $copia['evento']);
 }
 
 // 4. AZIONE: ESPORTA ISCRITTI
 if (isset($_POST['export_csv_archivio'])) {
-    $ev_id = (int)$_POST['evento_id'];
+    $ev_id = $ev_azione; // già verificato (CSRF + permessi) all'inizio della pagina
     $ev_titolo = preg_replace('/[^a-zA-Z0-9_]/', '_', strtolower($_POST['evento_titolo']));
     
     $custom_cols = [];
@@ -180,18 +152,31 @@ if ($res_arch) while($row = $res_arch->fetch_assoc()) $eventi_archiviati[] = $ro
                                 <div class="d-flex justify-content-end gap-2">
                                     <form method="POST" class="m-0">
                                         <input type="hidden" name="evento_id" value="<?php echo $ev['id']; ?>">
+                                        <?php csrf_field(); ?>
                                         <input type="hidden" name="evento_titolo" value="<?php echo htmlspecialchars($ev['titolo']); ?>">
                                         <button type="submit" name="export_csv_archivio" class="btn btn-success btn-sm fw-bold shadow-sm" title="Esporta CSV Rendicontazione"><i class="fa fa-file-csv"></i> Report</button>
                                     </form>
                                     
                                     <a href="sondaggi.php?p_id=<?php echo $filtro_p; ?>&f_sond_ev=<?php echo $ev['id']; ?>&archivio=1" class="btn btn-info btn-sm fw-bold text-white shadow-sm" title="Vedi Risultati Sondaggio Archiviato"><i class="fa fa-poll"></i> Sondaggi</a>
                                     
-                                    <a href="?duplica_ev=<?php echo $ev['id']; ?>&p_id=<?php echo $filtro_p; ?>" class="btn btn-warning btn-sm fw-bold text-dark shadow-sm" data-confirm="Vuoi creare una copia esatta di questo evento (svuotata da iscritti e vecchie date) per riproporla quest\'anno?"><i class="fa fa-copy"></i> Duplica</a>
-                                    
-                                    <a href="?ripristina_ev=<?php echo $ev['id']; ?>&p_id=<?php echo $filtro_p; ?>" class="btn btn-outline-primary btn-sm fw-bold" data-confirm="Ripristinare questo evento rendendolo di nuovo visibile al pubblico assieme a tutti i suoi vecchi iscritti?"><i class="fa fa-undo"></i> Ripristina</a>
-                                    
+                                    <form method="POST" class="m-0">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="evento_id" value="<?php echo (int)$ev['id']; ?>">
+                                        <button type="submit" name="duplica_ev" value="1" class="btn btn-warning btn-sm fw-bold text-dark shadow-sm" data-confirm="Vuoi creare una copia di questo evento (senza iscritti e senza le vecchie date) per riproporlo?"><i class="fa fa-copy" aria-hidden="true"></i> Duplica</button>
+                                    </form>
+
+                                    <form method="POST" class="m-0">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="evento_id" value="<?php echo (int)$ev['id']; ?>">
+                                        <button type="submit" name="ripristina_ev" value="1" class="btn btn-outline-primary btn-sm fw-bold" data-confirm="Ripristinare questo evento rendendolo di nuovo visibile al pubblico assieme a tutti i suoi vecchi iscritti?"><i class="fa fa-undo" aria-hidden="true"></i> Ripristina</button>
+                                    </form>
+
                                     <?php if ($can_manage_settings): ?>
-                                        <a href="?del_ev=<?php echo $ev['id']; ?>&p_id=<?php echo $filtro_p; ?>" class="btn btn-outline-danger btn-sm" data-confirm="Sei assolutamente sicuro di voler eliminare questo evento e tutto il suo storico iscritti?"><i class="fa fa-trash"></i></a>
+                                        <form method="POST" class="m-0">
+                                            <?php csrf_field(); ?>
+                                            <input type="hidden" name="evento_id" value="<?php echo (int)$ev['id']; ?>">
+                                            <button type="submit" name="del_ev" value="1" class="btn btn-outline-danger btn-sm" data-confirm="Sei assolutamente sicuro di voler eliminare questo evento e tutto il suo storico iscritti?" title="Elimina definitivamente" aria-label="Elimina definitivamente"><i class="fa fa-trash" aria-hidden="true"></i></button>
+                                        </form>
                                     <?php endif; ?>
                                 </div>
                             </td>

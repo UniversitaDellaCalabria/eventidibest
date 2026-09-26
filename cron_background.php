@@ -2,6 +2,7 @@
 // cron_background.php - Motore Automazioni (Da richiamare ogni 15 minuti tramite crontab Ubuntu)
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/functions.php';
+consenti_esecuzione_cron([1]); // solo crontab, chiave CRON_KEY o admin loggato
 
 // =========================================================================
 // FASE 3: MUTEX LOCK PER PREVENIRE ESECUZIONI SOVRAPPOSTE (stesso pattern già

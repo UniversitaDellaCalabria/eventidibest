@@ -3,6 +3,7 @@
 if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once __DIR__ . '/../config.php';
 if (!function_exists('flash_set')) { require_once __DIR__ . '/../functions.php'; }
+consenti_esecuzione_cron([1]); // solo crontab, chiave CRON_KEY o admin (pulsante in Sistema)
 
 
 // Invio tramite la funzione unica di functions.php (verifica risposte SMTP e scrive log_email)
